@@ -60,7 +60,7 @@ def overnight_hours_between(start_time, end_time):
     return (end_min - 24 * 60) / 60.0
 
 
-def calc_day_hours(work_date, start_time, end_time, break_minutes, settings, is_special=0):
+def calc_day_hours(work_date, start_time, end_time, break_minutes, settings, is_special=0, department=None):
     work_dt = parse_date(work_date)
     weekday = work_dt.weekday()  # 0=Mon, 5=Sat, 6=Sun
 
@@ -79,17 +79,25 @@ def calc_day_hours(work_date, start_time, end_time, break_minutes, settings, is_
     night_hours = night_hours_between(st, et)
     overnight_hours = overnight_hours_between(st, et)
 
-    weekday_hours = float(settings.get("weekday_hours", "9") or 9)
+    weekday_hours = float(settings.get("weekday_hours", "8") or 8)
     saturday_start = settings.get("saturday_start", "09:00")
     saturday_end = settings.get("saturday_end", "14:00")
+
+    department_key = str(department or "").strip().upper()
 
     if weekday <= 4:
         scheduled_hours = weekday_hours
     elif weekday == 5:
-        sat_hours = hours_between(parse_time(saturday_start), parse_time(saturday_end))
-        scheduled_hours = sat_hours
+        if department_key == "STANT":
+            scheduled_hours = 8.0
+        else:
+            sat_hours = hours_between(parse_time(saturday_start), parse_time(saturday_end))
+            scheduled_hours = sat_hours
     else:
-        scheduled_hours = 0.0
+        if department_key == "STANT":
+            scheduled_hours = 8.0
+        else:
+            scheduled_hours = 0.0
 
     if is_special:
         scheduled_hours = 0.0
@@ -101,7 +109,7 @@ def calc_day_hours(work_date, start_time, end_time, break_minutes, settings, is_
         if scheduled_hours == 0.0:
             overtime_hours = max(0.0, worked_hours)
         else:
-            overtime_hours = max(0.0, gross_hours - scheduled_hours)
+            overtime_hours = max(0.0, worked_hours - scheduled_hours)
         special_normal = 0.0
         special_overtime = 0.0
         special_night = 0.0
