@@ -47,7 +47,7 @@ EXPORT_DIR = os.path.join(DB_DIR, "exports")
 DEFAULT_SETTINGS = {
     "company_name": "",
     "report_title": "Rainstaff Puantaj ve Mesai Raporu",
-    "weekday_hours": "9",
+    "weekday_hours": "8",
     "saturday_start": "09:00",
     "saturday_end": "14:00",
     "logo_path": "",
@@ -506,7 +506,7 @@ def list_timesheets(employee_id=None, start_date=None, end_date=None, region=Non
     """List timesheets with optional filters"""
     with get_conn() as conn:
         query = """
-            SELECT t.id, t.employee_id, e.full_name, t.work_date, t.start_time, t.end_time,
+            SELECT t.id, t.employee_id, e.full_name, e.department, t.work_date, t.start_time, t.end_time,
                    t.break_minutes, t.is_special, t.notes, t.region
             FROM timesheets t
             JOIN employees e ON t.employee_id = e.id

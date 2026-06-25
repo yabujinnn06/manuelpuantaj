@@ -1,0 +1,14 @@
+Metadata-Version: 2.4
+Name: cli-anything-puantaj
+Version: 1.0.0
+Summary: Agent-usable CLI for the Rainstaff puantaj application
+Requires-Python: >=3.10
+Requires-Dist: click>=8.0
+Provides-Extra: report
+Requires-Dist: openpyxl>=3.1; extra == "report"
+Requires-Dist: Pillow>=11.0; extra == "report"
+Requires-Dist: reportlab>=4.0; extra == "report"
+Dynamic: provides-extra
+Dynamic: requires-dist
+Dynamic: requires-python
+Dynamic: summary

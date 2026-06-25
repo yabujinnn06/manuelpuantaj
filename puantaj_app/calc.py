@@ -1,4 +1,4 @@
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 
 
 def parse_time(value):
@@ -20,7 +20,7 @@ def hours_between(start_time, end_time):
     start_dt = datetime.combine(date.today(), start_time)
     end_dt = datetime.combine(date.today(), end_time)
     if end_dt < start_dt:
-        end_dt = end_dt.replace(day=end_dt.day + 1)
+        end_dt = end_dt + timedelta(days=1)
     delta = end_dt - start_dt
     return delta.total_seconds() / 3600.0
 
@@ -58,6 +58,12 @@ def overnight_hours_between(start_time, end_time):
     if end_min <= 24 * 60:
         return 0.0
     return (end_min - 24 * 60) / 60.0
+
+
+def is_sunday_non_stand(work_date, department=None):
+    work_dt = parse_date(work_date)
+    department_key = str(department or "").strip().upper()
+    return work_dt.weekday() == 6 and department_key != "STANT"
 
 
 def calc_day_hours(work_date, start_time, end_time, break_minutes, settings, is_special=0, department=None):
@@ -106,7 +112,10 @@ def calc_day_hours(work_date, start_time, end_time, break_minutes, settings, is_
         special_overtime = 0.0
         special_night = night_hours
     else:
-        if scheduled_hours == 0.0:
+        if is_sunday_non_stand(work_date, department):
+            # Pazar calismasi normal fazla mesaiye eklenmez; arayuz/raporda ayri takip edilir.
+            overtime_hours = 0.0
+        elif scheduled_hours == 0.0:
             overtime_hours = max(0.0, worked_hours)
         else:
             overtime_hours = max(0.0, worked_hours - scheduled_hours)

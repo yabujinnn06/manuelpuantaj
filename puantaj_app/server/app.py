@@ -17,6 +17,8 @@ import puantaj_db as db
 
 app = Flask(__name__, template_folder='templates', static_folder='static')
 app.secret_key = os.environ.get('SECRET_KEY', 'dev-secret-key-change-in-production')
+SYNC_ENABLED = False
+VEHICLE_MODULE_ENABLED = False
 
 
 # Decorator to mark endpoints as public (exempt from auth)
@@ -51,6 +53,8 @@ def auto_sync():
     Automatic sync trigger (for cron jobs / UptimeRobot)
     PUBLIC ENDPOINT - No authentication required
     """
+    if not SYNC_ENABLED:
+        return jsonify({'success': False, 'error': 'Sync disabled'}), 410
     try:
         return jsonify({
             'success': True,
@@ -107,6 +111,8 @@ def sync_reset():
     Reset server database - delete all data so fresh upload can happen.
     Use with caution! Requires secret key.
     """
+    if not SYNC_ENABLED:
+        return jsonify({'error': 'Sync disabled'}), 410
     try:
         # Simple security - require a reset key
         reset_key = request.headers.get('X-Reset-Key', '')
@@ -137,6 +143,8 @@ def sync_upload():
     Upload database file from desktop app with merge support.
     Respects deleted_records table to prevent deleted data from reappearing.
     """
+    if not SYNC_ENABLED:
+        return jsonify({'error': 'Sync disabled'}), 410
     try:
         # Accept both 'db' and 'file' keys for backwards compatibility
         if 'db' in request.files:
@@ -375,6 +383,8 @@ def sync_download():
     Download current database from server
     Returns: SQLite DB file (binary)
     """
+    if not SYNC_ENABLED:
+        return jsonify({'error': 'Sync disabled'}), 410
     try:
         db_path = db.DB_PATH
         if not os.path.exists(db_path):
@@ -516,6 +526,8 @@ def stock():
 @app.route('/vehicles')
 def vehicles():
     """Vehicle management page"""
+    if not VEHICLE_MODULE_ENABLED:
+        return render_template('error.html', error='Araç modülü kaldırıldı.'), 404
     if 'user_id' not in session:
         return redirect(url_for('login'))
     
@@ -529,6 +541,8 @@ def vehicles():
 @app.route('/drivers')
 def drivers():
     """Driver management page"""
+    if not VEHICLE_MODULE_ENABLED:
+        return render_template('error.html', error='Araç modülü kaldırıldı.'), 404
     if 'user_id' not in session:
         return redirect(url_for('login'))
     
@@ -542,6 +556,8 @@ def drivers():
 @app.route('/vehicle-faults')
 def vehicle_faults():
     """Vehicle faults management page"""
+    if not VEHICLE_MODULE_ENABLED:
+        return render_template('error.html', error='Araç modülü kaldırıldı.'), 404
     if 'user_id' not in session:
         return redirect(url_for('login'))
     
@@ -574,10 +590,10 @@ def api_employee_timesheets(emp_id):
             result = []
             for ts in timesheets:
                 result.append({
-                    'work_date': ts[3],
-                    'start_time': ts[4],
-                    'end_time': ts[5],
-                    'break_minutes': ts[6],
+                    'work_date': ts[4],
+                    'start_time': ts[5],
+                    'end_time': ts[6],
+                    'break_minutes': ts[7],
                     'worked_hours': 0.0,
                     'overtime': 0.0,
                     'night_hours': 0.0
@@ -597,7 +613,7 @@ def api_employee_timesheets(emp_id):
         
         for ts in timesheets:
             try:
-                work_date, start_time, end_time, break_minutes, is_special = ts[3], ts[4], ts[5], ts[6], ts[7]
+                work_date, start_time, end_time, break_minutes, is_special = ts[4], ts[5], ts[6], ts[7], ts[8]
                 
                 # Apply date filters
                 if month and work_date[5:7] != month:
@@ -607,7 +623,7 @@ def api_employee_timesheets(emp_id):
                 
                 # Calculate hours
                 worked, regular, overtime, night, overnight, special_day, special_night, special_overnight = calc.calc_day_hours(
-                    work_date, start_time, end_time, break_minutes, settings, is_special
+                    work_date, start_time, end_time, break_minutes, settings, is_special, ts[3]
                 )
                 
                 result.append({
@@ -621,10 +637,10 @@ def api_employee_timesheets(emp_id):
                 })
             except Exception:
                 result.append({
-                    'work_date': ts[3],
-                    'start_time': ts[4],
-                    'end_time': ts[5],
-                    'break_minutes': ts[6],
+                    'work_date': ts[4],
+                    'start_time': ts[5],
+                    'end_time': ts[6],
+                    'break_minutes': ts[7],
                     'worked_hours': 0.0,
                     'overtime': 0.0,
                     'night_hours': 0.0
@@ -651,18 +667,19 @@ def api_timesheets():
         # Tuple listesini JSON'a çevir
         result = []
         for ts in timesheets:
-             # ts: (id, employee_id, full_name, work_date, start_time, end_time, break_minutes, is_special, notes, region)
+             # ts: (id, employee_id, full_name, department, work_date, start_time, end_time, break_minutes, is_special, notes, region)
             result.append({
                 'id': ts[0],
                 'employee_id': ts[1],
                 'employee_name': ts[2],
-                'work_date': ts[3],
-                'start_time': ts[4],
-                'end_time': ts[5],
-                'break_minutes': ts[6],
-                'is_special': ts[7],
-                'notes': ts[8],
-                'region': ts[9]
+                'department': ts[3],
+                'work_date': ts[4],
+                'start_time': ts[5],
+                'end_time': ts[6],
+                'break_minutes': ts[7],
+                'is_special': ts[8],
+                'notes': ts[9],
+                'region': ts[10]
             })
             
         return jsonify(result), 200
@@ -702,13 +719,13 @@ def api_employee_overtime():
             for ts in timesheets:
                 try:
                     # Tarih filtresi uygula
-                    wd = ts[3] # YYYY-MM-DD
+                    wd = ts[4] # YYYY-MM-DD
                     if month and wd[5:7] != month: continue
                     if year and wd[0:4] != year: continue
                     
                     # Basit hesap
                     worked, regular, overtime, night, overnight, special_day, special_night, special_overnight = calc.calc_day_hours(
-                        ts[3], ts[4], ts[5], ts[6], settings, ts[7]
+                        ts[4], ts[5], ts[6], ts[7], settings, ts[8], ts[3]
                     )
                     total_overtime += overtime
                 except Exception:
@@ -736,6 +753,8 @@ def api_employee_overtime():
 @app.route('/api/vehicles')
 def api_vehicles():
     """Get all vehicles with alert status"""
+    if not VEHICLE_MODULE_ENABLED:
+        return jsonify({'error': 'Araç modülü kaldırıldı'}), 410
     if 'user_id' not in session:
         return jsonify({'error': 'Unauthorized'}), 401
     
@@ -824,6 +843,8 @@ def api_vehicles():
 @app.route('/api/drivers')
 def api_drivers():
     """Get all drivers"""
+    if not VEHICLE_MODULE_ENABLED:
+        return jsonify({'error': 'Araç modülü kaldırıldı'}), 410
     if 'user_id' not in session:
         return jsonify({'error': 'Unauthorized'}), 401
     
@@ -874,6 +895,8 @@ def api_drivers():
 @app.route('/api/vehicle-faults')
 def api_vehicle_faults():
     """Get vehicle faults"""
+    if not VEHICLE_MODULE_ENABLED:
+        return jsonify({'error': 'Araç modülü kaldırıldı'}), 410
     if 'user_id' not in session:
         return jsonify({'error': 'Unauthorized'}), 401
     

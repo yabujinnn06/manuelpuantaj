@@ -33,7 +33,6 @@
         <button class="nav-tab" onclick="showTab('employees')">ÇALIŞANLAR</button>
         <button class="nav-tab" onclick="showTab('timesheets')">PUANTAJ</button>
         <button class="nav-tab" onclick="showTab('stock')">STOK</button>
-        <button class="nav-tab" onclick="showTab('vehicles')">ARAÇLAR</button>
         <button class="nav-tab" onclick="showTab('reports')">RAPORLAR</button>
     </div>
 </div>
@@ -1236,36 +1235,6 @@
         </div>
     </div>
 
-    <!-- VEHICLES TAB -->
-    <div id="vehicles" class="tab-content">
-        <!-- İstatistik Kartları -->
-        <div class="stats-grid" style="margin-bottom: 20px;">
-            <div class="stat-card">
-                <h3>Toplam Araç</h3>
-                <div class="value" id="total-vehicles">-</div>
-            </div>
-            <div class="stat-card" style="border-color: #ff4444;">
-                <h3>Kritik Uyarı</h3>
-                <div class="value" id="critical-vehicles" style="color: #ff4444;">-</div>
-            </div>
-            <div class="stat-card" style="border-color: #FFD700;">
-                <h3>Yaklaşan İşlem</h3>
-                <div class="value" id="warning-vehicles" style="color: #FFD700;">-</div>
-            </div>
-            <div class="stat-card" style="border-color: var(--matrix-green);">
-                <h3>Normal Durum</h3>
-                <div class="value" id="normal-vehicles" style="color: var(--matrix-green);">-</div>
-            </div>
-        </div>
-
-        <!-- Araç Kartları -->
-        <div id="vehicles-grid" class="vehicles-grid">
-            <div style="text-align: center; padding: 40px; color: var(--text-muted);">
-                <div class="loading">Araçlar yükleniyor...</div>
-            </div>
-        </div>
-    </div>
-
     <!-- REPORTS TAB -->
     <div id="reports" class="tab-content">
         <div class="card">
@@ -1298,9 +1267,6 @@
             loadEmployeeData();
         } else if (tabName === 'timesheets') {
             loadTimesheetsData();
-        } else if (tabName === 'vehicles') {
-            loadVehiclesData();
-        }
     }
 
     // ==== TIMESHEETS DATA ====

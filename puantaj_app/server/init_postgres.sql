@@ -163,7 +163,7 @@ CREATE TABLE IF NOT EXISTS deleted_records (
 INSERT INTO settings (key, value) VALUES 
     ('company_name', ''),
     ('report_title', 'Rainstaff Puantaj ve Mesai Raporu'),
-    ('weekday_hours', '9'),
+    ('weekday_hours', '8'),
     ('saturday_start', '09:00'),
     ('saturday_end', '14:00'),
     ('logo_path', ''),

@@ -47,7 +47,7 @@ EXPORT_DIR = os.path.join(DB_DIR, "exports")
 DEFAULT_SETTINGS = {
     "company_name": "",
     "report_title": "Rainstaff Puantaj ve Mesai Raporu",
-    "weekday_hours": "9",
+    "weekday_hours": "8",
     "saturday_start": "09:00",
     "saturday_end": "14:00",
     "logo_path": "",
@@ -154,6 +154,53 @@ def init_db():
                 start_time TEXT NOT NULL,
                 end_time TEXT NOT NULL,
                 break_minutes INTEGER NOT NULL DEFAULT 0
+            );
+        """)
+
+        # Attendance records table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS attendance_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                work_date TEXT NOT NULL,
+                status TEXT NOT NULL,
+                reason TEXT,
+                source TEXT,
+                region TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE(employee_id, work_date),
+                FOREIGN KEY (employee_id) REFERENCES employees (id) ON DELETE CASCADE
+            );
+        """)
+
+        # Leave records table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS leave_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                employee_id INTEGER NOT NULL,
+                start_date TEXT NOT NULL,
+                end_date TEXT NOT NULL,
+                leave_type TEXT,
+                reason TEXT,
+                document_no TEXT,
+                document_path TEXT,
+                status TEXT DEFAULT 'Onayli',
+                region TEXT,
+                created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (employee_id) REFERENCES employees (id) ON DELETE CASCADE
+            );
+        """)
+
+        # Leave status history table
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS leave_status_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                leave_id INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                note TEXT,
+                changed_by TEXT,
+                changed_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (leave_id) REFERENCES leave_records (id) ON DELETE CASCADE
             );
         """)
         
@@ -432,6 +479,14 @@ def get_user(username):
             }
     return None
 
+def list_users():
+    """List all users"""
+    with get_conn() as conn:
+        cursor = conn.execute(
+            "SELECT id, username, role, region FROM users ORDER BY username;"
+        )
+        return cursor.fetchall()
+
 # ============================================================================
 # SETTINGS
 # ============================================================================
@@ -506,7 +561,7 @@ def list_timesheets(employee_id=None, start_date=None, end_date=None, region=Non
     """List timesheets with optional filters"""
     with get_conn() as conn:
         query = """
-            SELECT t.id, t.employee_id, e.full_name, t.work_date, t.start_time, t.end_time,
+            SELECT t.id, t.employee_id, e.full_name, e.department, t.work_date, t.start_time, t.end_time,
                    t.break_minutes, t.is_special, t.notes, t.region
             FROM timesheets t
             JOIN employees e ON t.employee_id = e.id
@@ -592,6 +647,163 @@ def delete_shift_template(template_id):
         conn.execute("DELETE FROM shift_templates WHERE id = ?;", (template_id,))
 
 # ============================================================================
+# ATTENDANCE & LEAVE
+# ============================================================================
+
+def upsert_attendance_record(employee_id, work_date, status, reason, region, source):
+    """Insert or update an attendance record for a day"""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO attendance_records (employee_id, work_date, status, reason, source, region)
+               VALUES (?, ?, ?, ?, ?, ?)
+               ON CONFLICT(employee_id, work_date)
+               DO UPDATE SET status = excluded.status,
+                             reason = excluded.reason,
+                             source = excluded.source,
+                             region = excluded.region;""",
+            (employee_id, work_date, status, reason, source, region),
+        )
+
+
+def delete_attendance_record(record_id):
+    """Delete an attendance record"""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM attendance_records WHERE id = ?;", (record_id,))
+
+
+def list_attendance_records(employee_id=None, start_date=None, end_date=None, status=None, region=None):
+    """List attendance records with employee info"""
+    query = """
+        SELECT a.id, a.employee_id, e.full_name, a.work_date, a.status, a.reason, a.source, a.region
+        FROM attendance_records a
+        JOIN employees e ON a.employee_id = e.id
+        WHERE 1=1
+    """
+    params = []
+    if employee_id:
+        query += " AND a.employee_id = ?"
+        params.append(employee_id)
+    if start_date:
+        query += " AND a.work_date >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND a.work_date <= ?"
+        params.append(end_date)
+    if status:
+        query += " AND a.status = ?"
+        params.append(status)
+    if region:
+        query += " AND a.region = ?"
+        params.append(region)
+    query += " ORDER BY a.work_date DESC, e.full_name;"
+    with get_conn() as conn:
+        cursor = conn.execute(query, params)
+        return cursor.fetchall()
+
+
+def add_leave_record(employee_id, start_date, end_date, leave_type, reason, document_no, status, region):
+    """Add a leave record and return its id"""
+    with get_conn() as conn:
+        cursor = conn.execute(
+            """INSERT INTO leave_records (employee_id, start_date, end_date, leave_type, reason, document_no, status, region)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?);""",
+            (employee_id, start_date, end_date, leave_type, reason, document_no, status, region),
+        )
+        return cursor.lastrowid
+
+
+def update_leave_record(leave_id, employee_id, start_date, end_date, leave_type, reason, document_no, status, region):
+    """Update a leave record"""
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE leave_records
+               SET employee_id = ?, start_date = ?, end_date = ?, leave_type = ?, reason = ?,
+                   document_no = ?, status = ?, region = ?
+               WHERE id = ?;""",
+            (employee_id, start_date, end_date, leave_type, reason, document_no, status, region, leave_id),
+        )
+
+
+def update_leave_document(leave_id, document_path, document_no):
+    """Update leave record document fields"""
+    with get_conn() as conn:
+        conn.execute(
+            """UPDATE leave_records SET document_path = ?, document_no = ? WHERE id = ?;""",
+            (document_path, document_no, leave_id),
+        )
+
+
+def delete_leave_record(leave_id):
+    """Delete a leave record"""
+    with get_conn() as conn:
+        conn.execute("DELETE FROM leave_records WHERE id = ?;", (leave_id,))
+
+
+def get_leave_record(leave_id):
+    """Get a leave record with employee info"""
+    query = """
+        SELECT l.id, l.employee_id, e.full_name, l.start_date, l.end_date, l.leave_type,
+               l.reason, l.document_no, l.document_path, l.status, l.region
+        FROM leave_records l
+        JOIN employees e ON l.employee_id = e.id
+        WHERE l.id = ?;
+    """
+    with get_conn() as conn:
+        cursor = conn.execute(query, (leave_id,))
+        return cursor.fetchone()
+
+
+def list_leave_records(employee_id=None, start_date=None, end_date=None, status=None, region=None):
+    """List leave records with filters"""
+    query = """
+        SELECT l.id, l.employee_id, e.full_name, l.start_date, l.end_date, l.leave_type,
+               l.reason, l.document_no, l.document_path, l.status, l.region
+        FROM leave_records l
+        JOIN employees e ON l.employee_id = e.id
+        WHERE 1=1
+    """
+    params = []
+    if employee_id:
+        query += " AND l.employee_id = ?"
+        params.append(employee_id)
+    if start_date:
+        query += " AND l.end_date >= ?"
+        params.append(start_date)
+    if end_date:
+        query += " AND l.start_date <= ?"
+        params.append(end_date)
+    if status:
+        query += " AND l.status = ?"
+        params.append(status)
+    if region:
+        query += " AND l.region = ?"
+        params.append(region)
+    query += " ORDER BY l.start_date DESC, e.full_name;"
+    with get_conn() as conn:
+        cursor = conn.execute(query, params)
+        return cursor.fetchall()
+
+def add_leave_status_history(leave_id, status, note=None, changed_by=None):
+    """Add leave status history entry"""
+    with get_conn() as conn:
+        conn.execute(
+            """INSERT INTO leave_status_history (leave_id, status, note, changed_by)
+               VALUES (?, ?, ?, ?);""",
+            (leave_id, status, note, changed_by),
+        )
+
+def list_leave_status_history(leave_id):
+    """List leave status history for a leave record"""
+    with get_conn() as conn:
+        cursor = conn.execute(
+            """SELECT status, note, changed_by, changed_at
+               FROM leave_status_history
+               WHERE leave_id = ?
+               ORDER BY changed_at DESC;""",
+            (leave_id,),
+        )
+        return cursor.fetchall()
+
 # REPORTS
 # ============================================================================
 

@@ -16,10 +16,12 @@ import traceback
 import sys
 import queue
 import shutil
+import calendar
 from datetime import datetime, date, time, timedelta
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import threading
+import time as time_module
 
 import calc
 from openpyxl import load_workbook
@@ -46,6 +48,10 @@ DEFAULT_OIL_INTERVAL_KM = 14000
 DEFAULT_OIL_SOON_KM = 2000
 LOG_DIR = os.path.join(os.path.dirname(db.DB_DIR), "logs")
 LOG_PATH = os.path.join(LOG_DIR, "rainstaff.log")
+
+ATTENDANCE_STATUSES = ["Calisti", "Izinli", "Gelmedi", "Raporlu", "Mazeret", "Tatil", "Diger"]
+LEAVE_TYPES = ["Yillik Izin", "Raporlu", "Ucretsiz Izin", "Mazeret", "Diger"]
+LEAVE_STATUSES = ["Onayli", "Beklemede", "Reddedildi"]
 
 VEHICLE_CHECKLIST = [
     ("body_dent", "Govde ezik/cizik"),
@@ -175,6 +181,18 @@ def week_end_from_start(week_start):
     """Hafta baslangicindan pazar gununu uret."""
     d = datetime.strptime(week_start, "%Y-%m-%d").date()
     return (d + timedelta(days=6)).strftime("%Y-%m-%d")
+
+
+def calc_sunday_separate_hours(work_date, department, is_special, worked_hours):
+    """Pazar (STANT haric) calisma saatini normal fazla mesaiden ayri takip et."""
+    if is_special:
+        return 0.0
+    try:
+        if calc.is_sunday_non_stand(work_date, department):
+            return max(0.0, float(worked_hours))
+    except Exception:
+        return 0.0
+    return 0.0
 
 
 def normalize_time_in_var(var):
@@ -378,6 +396,111 @@ def clear_date_entry(entry):
         pass
 
 
+def attach_tooltip(widget, text):
+    if not text:
+        return
+    tip = {"window": None}
+
+    def show_tip(_event=None):
+        if tip["window"] or not widget.winfo_exists():
+            return
+        x = widget.winfo_pointerx() + 10
+        y = widget.winfo_pointery() + 12
+        win = tk.Toplevel(widget)
+        win.wm_overrideredirect(True)
+        win.wm_geometry(f"+{x}+{y}")
+        label = tk.Label(
+            win,
+            text=text,
+            bg="#202020",
+            fg="#E0E0E0",
+            font=("Segoe UI", 9),
+            padx=8,
+            pady=4,
+            borderwidth=1,
+            relief="solid",
+        )
+        label.pack()
+        tip["window"] = win
+
+    def hide_tip(_event=None):
+        if tip["window"]:
+            try:
+                tip["window"].destroy()
+            except Exception:
+                pass
+            tip["window"] = None
+
+    widget.bind("<Enter>", show_tip)
+    widget.bind("<Leave>", hide_tip)
+    widget.bind("<ButtonPress>", hide_tip)
+
+
+def insert_empty_row(tree, columns, message):
+    values = [message] + [""] * (len(columns) - 1)
+    tree.insert("", tk.END, values=values, tags=("empty",))
+
+
+def create_kpi_card(parent, title, value_var, subtitle=None, theme=None, accent=None):
+    if theme is None:
+        theme = {
+            "bg_content": "#1F1F1F",
+            "bg_hover": "#2A2A2A",
+            "text_primary": "#E0E0E0",
+            "text_secondary": "#8C8C8C",
+            "primary": "#5B9BD5",
+        }
+    accent = accent or theme.get("primary", "#5B9BD5")
+
+    card = tk.Frame(
+        parent,
+        bg=theme["bg_content"],
+        highlightthickness=1,
+        highlightbackground=theme["bg_hover"],
+    )
+    top = tk.Frame(card, bg=accent, height=3)
+    top.pack(fill=tk.X)
+    body = tk.Frame(card, bg=theme["bg_content"])
+    body.pack(fill=tk.BOTH, expand=True, padx=14, pady=10)
+    title_lbl = tk.Label(body, text=title, bg=theme["bg_content"], fg=theme["text_secondary"], font=("Segoe UI", 9))
+    title_lbl.pack(anchor="w")
+    value_lbl = tk.Label(
+        body,
+        textvariable=value_var,
+        bg=theme["bg_content"],
+        fg=theme["text_primary"],
+        font=("Segoe UI", 16, "bold"),
+    )
+    value_lbl.pack(anchor="w", pady=(4, 0))
+    if subtitle:
+        sub_lbl = tk.Label(
+            body, text=subtitle, bg=theme["bg_content"], fg=theme["text_secondary"], font=("Segoe UI", 9)
+        )
+        sub_lbl.pack(anchor="w", pady=(4, 0))
+
+    def _set_bg(bg):
+        card.configure(bg=bg)
+        body.configure(bg=bg)
+        title_lbl.configure(bg=bg)
+        value_lbl.configure(bg=bg)
+        if subtitle:
+            sub_lbl.configure(bg=bg)
+
+    def _on_enter(_event=None):
+        _set_bg(theme["bg_hover"])
+        card.configure(highlightbackground=accent)
+
+    def _on_leave(_event=None):
+        _set_bg(theme["bg_content"])
+        card.configure(highlightbackground=theme["bg_hover"])
+
+    card.bind("<Enter>", _on_enter)
+    card.bind("<Leave>", _on_leave)
+    body.bind("<Enter>", _on_enter)
+    body.bind("<Leave>", _on_leave)
+    return card
+
+
 def ensure_logo_asset(path):
     if os.path.isfile(path):
         return
@@ -472,30 +595,30 @@ class PuantajApp(tk.Tk):
                 "accent_gold": "#C9A961"
             },
             "Sabah": {
-                "bg_app": "#F5F5F5",
-                "bg_content": "#FFFFFF",
-                "bg_elevated": "#E8E8E8",
-                "bg_input": "#F0F0F0",
-                "bg_hover": "#D0D0D0",
-                "text_primary": "#333333",
-                "text_secondary": "#666666",
-                "text_disabled": "#999999",
-                "primary": "#4A90E2",
-                "primary_hover": "#357ABD",
-                "accent_gold": "#F5A623"
+                "bg_app": "#F1F3F5",
+                "bg_content": "#FAFAFB",
+                "bg_elevated": "#E6E8EB",
+                "bg_input": "#F3F4F6",
+                "bg_hover": "#E0E4EA",
+                "text_primary": "#1F2933",
+                "text_secondary": "#5B6470",
+                "text_disabled": "#9AA3AD",
+                "primary": "#3A7BD5",
+                "primary_hover": "#2F6BBE",
+                "accent_gold": "#DFA84A"
             },
             "Matrix": {
-                "bg_app": "#000000",
-                "bg_content": "#001100",
-                "bg_elevated": "#002200",
-                "bg_input": "#003300",
-                "bg_hover": "#004400",
-                "text_primary": "#00FF00",
-                "text_secondary": "#00AA00",
-                "text_disabled": "#005500",
-                "primary": "#00FF00",
-                "primary_hover": "#00DD00",
-                "accent_gold": "#FFFF00"
+                "bg_app": "#0E1621",
+                "bg_content": "#16212E",
+                "bg_elevated": "#1F2B3A",
+                "bg_input": "#203040",
+                "bg_hover": "#2A3B4D",
+                "text_primary": "#E6EEF5",
+                "text_secondary": "#AAB8C6",
+                "text_disabled": "#6E7B88",
+                "primary": "#4F8CC9",
+                "primary_hover": "#66A3E0",
+                "accent_gold": "#7FB3E6"
             }
         }
         self.current_theme = self.settings.get("theme", "Gece")
@@ -558,58 +681,87 @@ class PuantajApp(tk.Tk):
 
     def _startup_step_data(self):
         self._load_tab_data(self.tab_employees)
-        self._start_keepalive()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._hide_loading()
 
     def _show_loading(self, text):
         overlay = tk.Toplevel(self)
-        overlay.title("Yükleniyor")
-        overlay.geometry("360x200")
+        overlay.overrideredirect(True)
+        overlay.attributes("-topmost", True)
+        overlay.configure(bg="#0f1115")
+
+        width, height = 420, 240
+        screen_w = overlay.winfo_screenwidth()
+        screen_h = overlay.winfo_screenheight()
+        x = int((screen_w - width) / 2)
+        y = int((screen_h - height) / 2)
+        overlay.geometry(f"{width}x{height}+{x}+{y}")
         overlay.resizable(False, False)
-        overlay.configure(bg="#1E1E1E")  # Koyu arka plan
         overlay.transient(self)
         overlay.grab_set()
         overlay.protocol("WM_DELETE_WINDOW", lambda: None)
 
-        # Koyu card
-        card = tk.Frame(overlay, bg="#2A2A2A", highlightbackground="#3A3A3A", highlightthickness=1)
-        card.place(x=16, y=16, relwidth=1, relheight=1, width=-32, height=-32)
+        card = tk.Frame(overlay, bg="#151821", highlightbackground="#2b2f3a", highlightthickness=1)
+        card.place(x=10, y=10, width=width - 20, height=height - 20)
 
-        # Logo
+        glow = tk.Canvas(card, bg="#151821", highlightthickness=0, height=60)
+        glow.pack(fill=tk.X)
+        glow.create_oval(20, -40, 200, 80, fill="#1f3550", outline="")
+        glow.create_oval(120, -50, 320, 70, fill="#203c5a", outline="")
+
         logo_path = os.path.join(os.path.dirname(__file__), "assets", "rainstaff_logo_1.png")
-        logo_img = load_logo_image(logo_path, target_height=40)
+        logo_img = load_logo_image(logo_path, target_height=56)
         if logo_img:
             self._loading_logo = logo_img
-            tk.Label(card, image=logo_img, bg="#2A2A2A").pack(pady=(32, 16))
+            tk.Label(card, image=logo_img, bg="#151821").pack(pady=(6, 4))
         else:
-            # Silik altın logo
-            tk.Label(card, text="RAINSTAFF", bg="#2A2A2A", fg="#C9A961", 
-                    font=("Segoe UI", 14, "bold")).pack(pady=(32, 16))
+            tk.Label(card, text="RAINSTAFF", bg="#151821", fg="#7BB3E0",
+                     font=("Segoe UI", 16, "bold")).pack(pady=(10, 4))
 
-        # Yükleniyor metni - silik gri
-        tk.Label(card, text=text, bg="#2A2A2A", fg="#B0B0B0", 
-                font=("Segoe UI", 10)).pack(pady=(0, 20))
+        tk.Label(card, text=text, bg="#151821", fg="#C8D3E0",
+                 font=("Segoe UI", 11, "bold")).pack(pady=(0, 4))
+        tk.Label(card, text="Sistem hazirlaniyor...", bg="#151821", fg="#6E7A8C",
+                 font=("Segoe UI", 9)).pack(pady=(0, 8))
 
-        # Spinner - silik mavi
-        spinner = tk.Canvas(card, width=40, height=40, bg="#2A2A2A", highlightthickness=0)
-        spinner.pack(pady=(0, 24))
+        spinner = tk.Canvas(card, width=140, height=30, bg="#151821", highlightthickness=0)
+        spinner.pack(pady=(2, 6))
+        dots = []
+        for i in range(3):
+            dot = spinner.create_oval(12 + i * 40, 10, 28 + i * 40, 26, fill="#7BB3E0", outline="")
+            dots.append(dot)
 
-        # Silik mavi ring
-        arc = spinner.create_arc(2, 2, 38, 38, start=0, extent=280, style="arc", 
-                                width=3, outline="#5B9BD5")
+        progress = tk.Canvas(card, width=260, height=10, bg="#151821", highlightthickness=0)
+        progress.pack(pady=(6, 6))
+        progress.create_rectangle(0, 0, 260, 10, fill="#1f242e", outline="")
+        shimmer = progress.create_rectangle(-60, 0, 0, 10, fill="#7BB3E0", outline="")
 
-        def step(angle=0):
-            if getattr(self, "_loading_overlay", None) is None:
-                return
-            spinner.itemconfigure(arc, start=angle)
-            overlay.after(20, step, (angle + 12) % 360)
-
-        step()
         self._loading_overlay = overlay
         self._loading_spinner = spinner
+        self._loading_started_at = time_module.time()
+
+        def step(idx=0, pos=-60):
+            if getattr(self, "_loading_overlay", None) is None:
+                return
+            for i, dot in enumerate(dots):
+                color = "#7BB3E0" if i == idx else "#3d4a5f"
+                spinner.itemconfigure(dot, fill=color)
+            pos = pos + 8
+            if pos > 260:
+                pos = -60
+            progress.coords(shimmer, pos, 0, pos + 60, 10)
+            overlay.after(120, step, (idx + 1) % len(dots), pos)
+
+        step()
+        overlay.update_idletasks()
+        overlay.lift()
 
     def _hide_loading(self):
+        min_show = 0.6
+        if getattr(self, "_loading_started_at", None):
+            elapsed = time_module.time() - self._loading_started_at
+            if elapsed < min_show:
+                self.after(int((min_show - elapsed) * 1000), self._hide_loading)
+                return
         if hasattr(self, "_loading_spinner"):
             self._loading_spinner = None
         if hasattr(self, "_loading_overlay"):
@@ -619,6 +771,7 @@ class PuantajApp(tk.Tk):
             except Exception:
                 pass
             self._loading_overlay = None
+        self._loading_started_at = None
 
     def _start_keepalive(self):
         self._keepalive_stop = threading.Event()
@@ -788,12 +941,10 @@ class PuantajApp(tk.Tk):
     def _refresh_region_views(self):
         self.refresh_employees()
         self.refresh_timesheets()
+        self.refresh_dashboard()
+        self.refresh_attendance()
+        self.refresh_leave_records()
         self.refresh_admin_summary()
-        self.refresh_vehicles()
-        self.refresh_drivers()
-        self.refresh_faults()
-        self.refresh_service_visits()
-        self.refresh_vehicle_dashboard()
 
     def _entry_region(self):
         if self.is_admin:
@@ -824,6 +975,7 @@ class PuantajApp(tk.Tk):
         text_disabled = theme["text_disabled"]
 
         self.configure(bg=bg_app)
+        self._ui_theme = theme
 
         style.configure("Header.TLabel",
             font=("Segoe UI", 18, "bold"),
@@ -900,19 +1052,32 @@ class PuantajApp(tk.Tk):
             background=bg_content,
             font=("Segoe UI", 10),
             foreground=text_primary)
+        style.configure("Status.TLabel",
+            background=bg_elevated,
+            foreground=text_secondary,
+            font=("Segoe UI", 9),
+            padding=(12, 6))
+        self._tree_colors = {
+            "odd": bg_content,
+            "even": bg_hover,
+            "empty": bg_content,
+            "text": text_primary,
+            "muted": text_secondary,
+        }
 
         style.configure("TNotebook",
             background=bg_app,
-            borderwidth=0,
-            tabmargins=(0, 0, 0, 0))
+            borderwidth=0)
         style.configure("TNotebook.Tab",
-            padding=(24, 12),
-            borderwidth=0,
-            font=("Segoe UI", 10))
-        style.map("TNotebook.Tab",
-            background=[("selected", bg_content), ("!selected", bg_app)],
-            foreground=[("selected", primary), ("!selected", text_secondary)],
-            expand=[("selected", [1, 1, 1, 0])])
+            padding=(16, 8),
+            background=bg_content,
+            foreground=text_secondary,
+            font=("Segoe UI", 10, "bold"))
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", bg_elevated), ("active", bg_hover)],
+            foreground=[("selected", text_primary), ("active", text_primary)],
+        )
 
         style.configure("TEntry",
             padding=(12, 10),
@@ -965,128 +1130,345 @@ class PuantajApp(tk.Tk):
         style.configure("Toolbutton", background=bg_content, foreground=text_primary)
         style.configure("TCheckbutton", background=bg_app, foreground=text_primary, indicatorcolor=bg_input)
 
+        # Hide notebook tabs (we use custom nav bar instead)
+        style.layout("Hidden.TNotebook.Tab", [])
+        style.configure("Hidden.TNotebook", tabmargins=0)
+
+    def _apply_tree_zebra(self, tree):
+        colors = getattr(self, "_tree_colors", None)
+        if not colors:
+            return
+        tree.tag_configure("odd", background=colors["odd"], foreground=colors["text"])
+        tree.tag_configure("even", background=colors["even"], foreground=colors["text"])
+        tree.tag_configure("empty", background=colors["empty"], foreground=colors["muted"])
+
+    def _auto_select_tree_first(self, tree, callback=None):
+        for item in tree.get_children():
+            tags = tree.item(item, "tags") or ()
+            if "empty" in tags:
+                continue
+            tree.selection_set(item)
+            tree.focus(item)
+            tree.see(item)
+            if callback:
+                try:
+                    callback()
+                except TypeError:
+                    callback(None)
+            return True
+        return False
+
+    def _set_pane_sash(self, pane, ratio=0.7):
+        try:
+            total = max(1, pane.winfo_width())
+            pane.sashpos(0, int(total * ratio))
+        except Exception:
+            pass
+
     def _build_ui(self):
         self.title("Rainstaff Puantaj")
         self.geometry("1280x800")
-        self.configure(bg="#1E1E1E")
+        self.minsize(1100, 700)
+        theme = self.themes.get(self.current_theme, self.themes["Gece"])
+        self.configure(bg=theme["bg_app"])
+        header_bg = theme["bg_elevated"]
+        header_fg = theme["text_primary"]
+        sub_fg = theme["text_secondary"]
 
-        header = tk.Frame(self, bg="#2A2A2A", height=64)
+        header = tk.Frame(self, bg=header_bg, height=80)
         header.pack(fill=tk.X)
         header.pack_propagate(False)
+        header.grid_columnconfigure(0, weight=1)
+        header.grid_columnconfigure(1, weight=1)
+        header.grid_columnconfigure(2, weight=0)
 
-        logo_container = tk.Frame(header, bg="#2A2A2A")
-        logo_container.place(x=32, y=16)
+        left_block = tk.Frame(header, bg=header_bg)
+        left_block.grid(row=0, column=0, sticky="w", padx=20, pady=12)
 
-        logo_path = os.path.join(os.path.dirname(__file__), "assets", "rainstaff_logo_1.png")
-        self._logo_image = load_logo_image(logo_path, target_height=32)
-        if self._logo_image:
-            tk.Label(logo_container, image=self._logo_image, bg="#2A2A2A").pack(side=tk.LEFT)
-        else:
-            tk.Label(logo_container, text="RAINSTAFF", bg="#2A2A2A",
-                fg="#C9A961", font=("Segoe UI", 12, "bold")).pack(side=tk.LEFT)
+        ascii_path = os.path.join(os.path.dirname(__file__), "assets", "ascii.png")
+        self._ascii_image = load_logo_image(ascii_path, target_height=28)
+        if self._ascii_image:
+            tk.Label(left_block, image=self._ascii_image, bg=header_bg).pack(side=tk.LEFT, padx=(0, 12))
 
-        # Tema değiştirme butonu (Ampul)
-        theme_icons = {"Gece": "🌙", "Sabah": "☀️", "Matrix": "💚"}
-        theme_icon = theme_icons.get(self.current_theme, "💡")
-        theme_btn = tk.Button(header, text=theme_icon, bg="#2A2A2A", fg="#C9A961",
-            font=("Segoe UI", 14), relief="flat", bd=0, cursor="hand2",
-            activebackground="#3A3A3A", activeforeground="#FFD700",
-            command=self._toggle_theme)
-        theme_btn.place(relx=1.0, x=-120, y=16, anchor="ne")
-        self.theme_btn = theme_btn
-        
-        user_info = tk.Frame(header, bg="#2A2A2A")
-        user_info.place(relx=1.0, x=-32, y=20, anchor="ne")
+        title_block = tk.Frame(left_block, bg=header_bg)
+        title_block.pack(side=tk.LEFT)
+        tk.Label(title_block, text="RAINSTAFF", bg=header_bg,
+            fg=header_fg, font=("Segoe UI", 13, "bold")).pack(anchor="w")
+        tk.Label(title_block, text="Puantaj Yönetimi", bg=header_bg,
+            fg=sub_fg, font=("Segoe UI", 9)).pack(anchor="w")
+
+        search_block = tk.Frame(header, bg=header_bg)
+        search_block.grid(row=0, column=1, sticky="ew", padx=12, pady=16)
+        search_block.grid_columnconfigure(1, weight=1)
+        tk.Label(search_block, text="Hizli Arama", bg=header_bg, fg=sub_fg,
+                 font=("Segoe UI", 9, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.global_search_var = tk.StringVar()
+        self.global_search_entry = ttk.Entry(search_block, textvariable=self.global_search_var)
+        self.global_search_entry.grid(row=0, column=1, sticky="ew")
+        self.global_search_entry.bind("<Return>", lambda _e: self._on_global_search())
+        btn_search = ttk.Button(search_block, text="Ara", style="Accent.TButton", command=self._on_global_search)
+        btn_search.grid(row=0, column=2, padx=8)
+        attach_tooltip(self.global_search_entry, "Calisan / not / tarih anahtar kelime")
+        attach_tooltip(btn_search, "Bulundugun sekmede ara")
+
+        user_info = tk.Frame(header, bg=header_bg)
+        user_info.grid(row=0, column=2, sticky="e", padx=20, pady=16)
+
+        icons = {"Gece": "🌙", "Sabah": "☀️", "Matrix": "💚"}
+        self.theme_btn = tk.Button(
+            user_info,
+            text=icons.get(self.current_theme, "💡"),
+            command=self._toggle_theme,
+            bg=header_bg,
+            fg=theme["accent_gold"],
+            font=("Segoe UI", 11, "bold"),
+            relief="flat",
+            cursor="hand2",
+            bd=0,
+            activebackground=header_bg,
+            activeforeground=theme["accent_gold"],
+        )
+        self.theme_btn.pack(side=tk.RIGHT, padx=(0, 12))
+        attach_tooltip(self.theme_btn, "Tema degistir (Gece / Sabah / Matrix)")
 
         user_text = f"{self.current_user}"
         if self.is_admin:
             user_text += " (Admin)"
-        tk.Label(user_info, text=user_text, bg="#2A2A2A",
-            fg="#B0B0B0", font=("Segoe UI", 10)).pack(side=tk.RIGHT)
+        region_text = self._view_region() or "Tum Bolgeler"
+        region_chip = tk.Label(
+            user_info,
+            text=region_text,
+            bg=theme["bg_hover"],
+            fg=header_fg,
+            font=("Segoe UI", 9, "bold"),
+            padx=8,
+            pady=3,
+        )
+        region_chip.pack(side=tk.RIGHT, padx=(0, 8))
+        tk.Label(user_info, text=user_text, bg=header_bg,
+            fg=sub_fg, font=("Segoe UI", 10)).pack(side=tk.RIGHT, padx=(0, 8))
 
-        divider = tk.Frame(self, bg="#3A3A3A", height=1)
+        divider = tk.Frame(self, bg=theme["bg_hover"], height=1)
         divider.pack(fill=tk.X)
 
-        self.notebook = ttk.Notebook(self)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
+        self.notebook = ttk.Notebook(self, style="Hidden.TNotebook")
 
+        self.tab_dashboard = ttk.Frame(self.notebook)
         self.tab_employees = ttk.Frame(self.notebook)
         self.tab_timesheets = ttk.Frame(self.notebook)
+        self.tab_attendance = ttk.Frame(self.notebook)
         self.tab_reports = ttk.Frame(self.notebook)
         self.tab_settings = ttk.Frame(self.notebook)
         self.tab_admin = ttk.Frame(self.notebook)
-        self.tab_vehicles = ttk.Frame(self.notebook)
-        self.tab_dashboard = ttk.Frame(self.notebook)
-        self.tab_service = ttk.Frame(self.notebook)
         self.tab_logs = ttk.Frame(self.notebook)
-        self.tab_stock = ttk.Frame(self.notebook)
 
         self.notebook.add(self.tab_dashboard, text="Dashboard")
         self.notebook.add(self.tab_timesheets, text="Puantaj")
+        self.notebook.add(self.tab_attendance, text="İzin & Yoklama")
         self.notebook.add(self.tab_employees, text="Çalışanlar")
-        self.notebook.add(self.tab_vehicles, text="Araçlar")
-        self.notebook.add(self.tab_service, text="Servis")
-        self.notebook.add(self.tab_stock, text="Stok Yönetimi")
         self.notebook.add(self.tab_reports, text="Raporlar")
         self.notebook.add(self.tab_admin, text="Yönetim")
         self.notebook.add(self.tab_settings, text="Ayarlar")
         self.notebook.add(self.tab_logs, text="Loglar")
 
+        nav_frame = tk.Frame(self, bg=theme["bg_content"])
+        nav_frame.pack(fill=tk.X, padx=10, pady=(6, 0))
+
+        def nav_button(text, tab, icon=""):
+            btn = tk.Button(
+                nav_frame,
+                text=f"{icon} {text}".strip(),
+                command=lambda: self._switch_tab(tab),
+                bg=theme["bg_content"],
+                fg=header_fg,
+                font=("Segoe UI", 9, "bold"),
+                relief="flat",
+                cursor="hand2",
+                bd=0,
+                padx=10,
+                pady=6,
+                activebackground=theme["bg_hover"],
+                activeforeground=header_fg,
+            )
+            btn.pack(side=tk.LEFT, padx=4)
+            attach_tooltip(btn, f"{text} sekmesine git")
+            return btn
+
+        self.nav_buttons = {
+            "dashboard": nav_button("Dashboard", self.tab_dashboard, "📊"),
+            "timesheets": nav_button("Puantaj", self.tab_timesheets, "🧾"),
+            "attendance": nav_button("İzin/Yoklama", self.tab_attendance, "🗓️"),
+            "employees": nav_button("Çalışanlar", self.tab_employees, "👥"),
+            "reports": nav_button("Raporlar", self.tab_reports, "📄"),
+            "admin": nav_button("Yönetim", self.tab_admin, "🧠"),
+            "settings": nav_button("Ayarlar", self.tab_settings, "⚙️"),
+            "logs": nav_button("Loglar", self.tab_logs, "🧾"),
+        }
+
+        self.notebook.pack(fill=tk.BOTH, expand=True, padx=0, pady=0)
+
+        self.tab_dashboard_body = self._make_tab_scrollable(self.tab_dashboard)
         self.tab_employees_body = self._make_tab_scrollable(self.tab_employees)
         self.tab_timesheets_body = self._make_tab_scrollable(self.tab_timesheets)
+        self.tab_attendance_body = self._make_tab_scrollable(self.tab_attendance)
         self.tab_reports_body = self._make_tab_scrollable(self.tab_reports)
         self.tab_settings_body = self._make_tab_scrollable(self.tab_settings)
         self.tab_admin_body = self._make_tab_scrollable(self.tab_admin)
-        self.tab_vehicles_body = self._make_tab_scrollable(self.tab_vehicles)
-        self.tab_dashboard_body = self._make_tab_scrollable(self.tab_dashboard)
-        self.tab_service_body = self._make_tab_scrollable(self.tab_service)
         self.tab_logs_body = self._make_tab_scrollable(self.tab_logs)
-        self.tab_stock_body = self._make_tab_scrollable(self.tab_stock)
 
+        self._build_dashboard_tab()
         self._build_employees_tab()
         self._build_timesheets_tab()
+        self._build_attendance_tab()
         self._build_reports_tab()
         self._build_settings_tab()
         self._build_admin_tab()
-        self._build_vehicles_tab()
-        self._build_dashboard_tab()
-        self._build_service_tab()
-        self._build_stock_tab()
         self._build_logs_tab()
 
         self.notebook.bind("<<NotebookTabChanged>>", self._on_tab_changed)
+        self._update_nav_highlight(self.tab_dashboard)
 
-        status_bar = ttk.Label(self, textvariable=self.status_var, anchor=tk.W, foreground="#5B9BD5")
+        status_bar = ttk.Label(self, textvariable=self.status_var, anchor=tk.W, style="Status.TLabel")
         status_bar.pack(fill=tk.X, padx=10, pady=(0, 8))
         self.status_var.set("Hazir")
+        self.bind_all("<Control-f>", self._focus_global_search)
+        self.bind_all("<Control-n>", self._quick_new_record)
+        self.bind_all("<Control-s>", self._quick_save_record)
 
     def _on_tab_changed(self, _event):
         current = self.notebook.nametowidget(self.notebook.select())
         self._load_tab_data(current)
+        if current is self.tab_timesheets:
+            self.refresh_shift_templates()
+        self._update_nav_highlight(current)
+
+    def _switch_tab(self, tab):
+        try:
+            self.notebook.select(tab)
+        except Exception:
+            pass
+
+    def _update_nav_highlight(self, current_tab):
+        if not hasattr(self, "nav_buttons"):
+            return
+        theme = self.themes.get(self.current_theme, self.themes["Gece"])
+        active_bg = theme["bg_hover"]
+        idle_bg = theme["bg_content"]
+        for key, btn in self.nav_buttons.items():
+            tab = {
+                "dashboard": self.tab_dashboard,
+                "timesheets": self.tab_timesheets,
+                "attendance": self.tab_attendance,
+                "employees": self.tab_employees,
+                "reports": self.tab_reports,
+                "admin": self.tab_admin,
+                "settings": self.tab_settings,
+                "logs": self.tab_logs,
+            }.get(key)
+            if tab is current_tab:
+                btn.configure(bg=active_bg)
+            else:
+                btn.configure(bg=idle_bg)
+
+    def _on_global_search(self):
+        text = self.global_search_var.get().strip()
+        current = self.notebook.nametowidget(self.notebook.select())
+        if current is self.tab_employees and hasattr(self, "emp_search_var"):
+            self.emp_search_var.set(text)
+            self.refresh_employees()
+        elif current is self.tab_timesheets and hasattr(self, "ts_filter_search_var"):
+            self.ts_filter_search_var.set(text)
+            self.refresh_timesheets()
+        elif current is self.tab_attendance:
+            if hasattr(self, "att_filter_search_var"):
+                self.att_filter_search_var.set(text)
+                self.refresh_attendance()
+            if hasattr(self, "leave_filter_search_var"):
+                self.leave_filter_search_var.set(text)
+                self.refresh_leave_records()
+        elif current is self.tab_admin:
+            self.admin_search_var.set(text)
+            self.refresh_admin_summary()
+
+    def _animate_stat(self, var, target, decimals=0, duration_ms=300):
+        try:
+            current = float(str(var.get()).replace(",", "."))
+        except Exception:
+            current = 0.0
+        try:
+            target_val = float(str(target).replace(",", "."))
+        except Exception:
+            target_val = 0.0
+        steps = 10
+        if duration_ms <= 0:
+            steps = 1
+        delta = (target_val - current) / steps if steps else 0
+        delay = max(20, duration_ms // steps) if steps else duration_ms
+
+        def step(i=0, value=current):
+            if i >= steps:
+                value = target_val
+            else:
+                value = value + delta
+            if decimals == 0:
+                var.set(str(int(round(value))))
+            else:
+                var.set(f"{value:.{decimals}f}")
+            if i < steps:
+                self.after(delay, step, i + 1, value)
+
+        step()
+
+    def _focus_global_search(self, _event=None):
+        if hasattr(self, "global_search_entry"):
+            self.global_search_entry.focus_set()
+            self.global_search_entry.select_range(0, tk.END)
+
+    def _quick_new_record(self, _event=None):
+        current = self.notebook.nametowidget(self.notebook.select())
+        if current is self.tab_timesheets:
+            self.clear_timesheet_form()
+        elif current is self.tab_employees:
+            self.clear_employee_form()
+        elif current is self.tab_attendance:
+            self.clear_attendance_form()
+            self.clear_leave_form()
+
+    def _quick_save_record(self, _event=None):
+        current = self.notebook.nametowidget(self.notebook.select())
+        if current is self.tab_timesheets:
+            self.add_or_update_timesheet()
+        elif current is self.tab_employees:
+            self.add_or_update_employee()
+        elif current is self.tab_attendance:
+            self.add_or_update_attendance()
+            if (
+                getattr(self, "leave_employee_var", None)
+                and (self.leave_employee_var.get().strip() or self.leave_start_var.get().strip())
+            ):
+                self.add_or_update_leave()
 
     def _load_tab_data(self, tab):
         if self._tab_loaded.get(tab):
             return
-        if tab is self.tab_employees:
+        if tab is self.tab_dashboard:
+            self.refresh_dashboard()
+        elif tab is self.tab_employees:
             self.refresh_employees()
         elif tab is self.tab_timesheets:
             self.refresh_employees()
             self.refresh_timesheets()
+            self.refresh_shift_templates()
+        elif tab is self.tab_attendance:
+            self.refresh_employees()
+            self.refresh_attendance()
+            self.refresh_leave_records()
         elif tab is self.tab_reports:
             self.refresh_report_archive()
         elif tab is self.tab_settings:
             self.refresh_shift_templates()
         elif tab is self.tab_admin:
             self.refresh_admin_summary()
-        elif tab is self.tab_vehicles:
-            self.refresh_vehicles()
-            self.refresh_drivers()
-            self.refresh_faults()
-            self.refresh_service_visits()
-        elif tab is self.tab_dashboard:
-            self.refresh_vehicle_dashboard()
-        elif tab is self.tab_service:
-            self.refresh_service_visits()
         self._tab_loaded[tab] = True
 
     def _make_tab_scrollable(self, tab):
@@ -1166,27 +1548,8 @@ class PuantajApp(tk.Tk):
             self.log_text.configure(state=tk.DISABLED)
 
     def trigger_sync(self, reason="manual", force=False):
-        if force and hasattr(self, "sync_enabled_var"):
-            enabled = self.sync_enabled_var.get()
-            sync_url = self.sync_url_var.get().strip()
-            token = self.sync_token_var.get().strip()
-        else:
-            self.settings = db.get_all_settings()
-            enabled = self.settings.get("sync_enabled") == "1"
-            sync_url = self.settings.get("sync_url", "").strip()
-            token = self.settings.get("sync_token", "").strip()
-        if not enabled:
-            self.status_var.set("Senkron kapali")
-            return
-        if requests is None:
-            self.status_var.set("Senkron icin requests kurulu degil")
-            return
-        if not sync_url:
-            self.status_var.set("Senkron URL bos")
-            return
-        self.status_var.set("Senkron basladi...")
-        thread = threading.Thread(target=self._sync_worker, args=(sync_url, token, reason), daemon=True)
-        thread.start()
+        # Bulut senkron kaldirildi - artik islem yapmiyoruz.
+        return
 
     def _sync_worker(self, sync_url, token, reason):
         """Senkronizasyon worker; upload + download + merge logic (19 Ocak)."""
@@ -1327,8 +1690,38 @@ class PuantajApp(tk.Tk):
         ttk.Button(btn_row, text="Temizle", command=self.clear_employee_form).pack(side=tk.LEFT, padx=6)
         ttk.Button(btn_row, text="Excel/CSV Iceri Aktar", command=self.import_employees).pack(side=tk.LEFT, padx=6)
 
-        list_frame = ttk.Frame(self.tab_employees_body)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        filter_frame = ttk.LabelFrame(self.tab_employees_body, text="Filtre", style="Section.TLabelframe")
+        filter_frame.pack(fill=tk.X, padx=6, pady=6)
+        self.emp_search_var = tk.StringVar()
+        ttk.Label(filter_frame, text="Ara").pack(side=tk.LEFT, padx=(0, 6))
+        emp_search_entry = ttk.Entry(filter_frame, textvariable=self.emp_search_var, width=26)
+        emp_search_entry.pack(side=tk.LEFT)
+        btn_emp_filter = ttk.Button(filter_frame, text="Guncelle", style="Accent.TButton", command=self.refresh_employees)
+        btn_emp_filter.pack(side=tk.LEFT, padx=6)
+        btn_emp_clear = ttk.Button(filter_frame, text="Temizle", command=self._clear_employee_search)
+        btn_emp_clear.pack(side=tk.LEFT)
+        attach_tooltip(emp_search_entry, "Ad, TCKN, departman, unvan veya bolge")
+        attach_tooltip(btn_emp_filter, "Listeyi yenile")
+        attach_tooltip(btn_emp_clear, "Aramayi temizle")
+
+        emp_stats_row = ttk.Frame(self.tab_employees_body)
+        emp_stats_row.pack(fill=tk.X, padx=6, pady=6)
+        self.emp_stats = {
+            "total": tk.StringVar(value="0"),
+            "departments": tk.StringVar(value="0"),
+            "regions": tk.StringVar(value="0"),
+        }
+        create_kpi_card(emp_stats_row, "Toplam Calisan", self.emp_stats["total"], theme=self._ui_theme).pack(side=tk.LEFT, padx=6)
+        create_kpi_card(emp_stats_row, "Departman", self.emp_stats["departments"], theme=self._ui_theme).pack(side=tk.LEFT, padx=6)
+        create_kpi_card(emp_stats_row, "Bolge", self.emp_stats["regions"], theme=self._ui_theme).pack(side=tk.LEFT, padx=6)
+
+        pane = ttk.PanedWindow(self.tab_employees_body, orient=tk.HORIZONTAL)
+        pane.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        list_frame = ttk.Frame(pane)
+        detail_frame = ttk.LabelFrame(pane, text="Detay", style="Section.TLabelframe")
+        pane.add(list_frame, weight=3)
+        pane.add(detail_frame, weight=2)
 
         columns = ("id", "name", "identity", "department", "title", "region")
         self.employee_tree = ttk.Treeview(list_frame, columns=columns, show="headings")
@@ -1347,6 +1740,7 @@ class PuantajApp(tk.Tk):
         # Koyu tema zebra satırları
         self.employee_tree.tag_configure("odd", background="#252525", foreground="#E0E0E0")
         self.employee_tree.tag_configure("even", background="#1F1F1F", foreground="#E0E0E0")
+        self.employee_tree.tag_configure("empty", background="#1F1F1F", foreground="#808080")
         emp_xscroll = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL, command=self.employee_tree.xview)
         emp_yscroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.employee_tree.yview)
         self.employee_tree.configure(xscrollcommand=emp_xscroll.set, yscrollcommand=emp_yscroll.set)
@@ -1356,6 +1750,57 @@ class PuantajApp(tk.Tk):
         emp_yscroll.grid(row=0, column=1, sticky="ns")
         emp_xscroll.grid(row=1, column=0, sticky="ew")
         self.employee_tree.bind("<<TreeviewSelect>>", self.on_employee_select)
+        self._apply_tree_zebra(self.employee_tree)
+
+        # Detail panel
+        self.emp_detail_name = tk.StringVar(value="-")
+        self.emp_detail_dept = tk.StringVar(value="-")
+        self.emp_detail_title = tk.StringVar(value="-")
+        self.emp_detail_region = tk.StringVar(value="-")
+        self.emp_detail_identity = tk.StringVar(value="-")
+
+        drow1 = ttk.Frame(detail_frame)
+        drow1.pack(fill=tk.X, pady=4)
+        ttk.Label(drow1, text="Ad Soyad").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(drow1, textvariable=self.emp_detail_name).pack(side=tk.LEFT)
+
+        drow2 = ttk.Frame(detail_frame)
+        drow2.pack(fill=tk.X, pady=4)
+        ttk.Label(drow2, text="Departman").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(drow2, textvariable=self.emp_detail_dept).pack(side=tk.LEFT)
+
+        drow3 = ttk.Frame(detail_frame)
+        drow3.pack(fill=tk.X, pady=4)
+        ttk.Label(drow3, text="Unvan").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(drow3, textvariable=self.emp_detail_title).pack(side=tk.LEFT)
+
+        drow4 = ttk.Frame(detail_frame)
+        drow4.pack(fill=tk.X, pady=4)
+        ttk.Label(drow4, text="Bolge").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(drow4, textvariable=self.emp_detail_region).pack(side=tk.LEFT)
+
+        drow5 = ttk.Frame(detail_frame)
+        drow5.pack(fill=tk.X, pady=4)
+        ttk.Label(drow5, text="TCKN").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(drow5, textvariable=self.emp_detail_identity).pack(side=tk.LEFT)
+
+        recent_frame = ttk.LabelFrame(detail_frame, text="Bu Ay Mesai", style="Section.TLabelframe")
+        recent_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        self.emp_recent_tree = ttk.Treeview(
+            recent_frame,
+            columns=("date", "worked", "overtime"),
+            show="headings",
+            height=8,
+        )
+        self.emp_recent_tree.heading("date", text="Tarih")
+        self.emp_recent_tree.heading("worked", text="Calisilan")
+        self.emp_recent_tree.heading("overtime", text="Fazla")
+        self.emp_recent_tree.column("date", width=100)
+        self.emp_recent_tree.column("worked", width=90)
+        self.emp_recent_tree.column("overtime", width=90)
+        self.emp_recent_tree.pack(fill=tk.BOTH, expand=True)
+        self._apply_tree_zebra(self.emp_recent_tree)
+
 
     def refresh_employees(self):
         for item in self.employee_tree.get_children():
@@ -1364,7 +1809,27 @@ class PuantajApp(tk.Tk):
         self.employee_display_names = []
         self.employee_details = {}
         name_counts = {}
-        for emp in db.list_employees(region=self._view_region()):
+        search = ""
+        if hasattr(self, "emp_search_var"):
+            search = self.emp_search_var.get().strip().lower()
+        employees = db.list_employees(region=self._view_region())
+        if search:
+            filtered = []
+            for emp in employees:
+                emp_id, name, identity_no, department, title, region = emp
+                hay = " ".join(
+                    [
+                        str(name or ""),
+                        str(identity_no or ""),
+                        str(department or ""),
+                        str(title or ""),
+                        str(region or ""),
+                    ]
+                ).lower()
+                if search in hay:
+                    filtered.append(emp)
+            employees = filtered
+        for emp in employees:
             emp_id, name, identity_no, department, title, region = emp
             name_counts[name] = name_counts.get(name, 0) + 1
             self.employee_map[(name, region or "")] = emp_id
@@ -1376,6 +1841,8 @@ class PuantajApp(tk.Tk):
                 "identity_no": identity_no or "",
                 "region": region or "",
             }
+        if not employees:
+            insert_empty_row(self.employee_tree, ("id", "name", "identity", "department", "title", "region"), "Kayit yok")
         self.employee_display_names = []
         for emp in db.list_employees(region=self._view_region()):
             _emp_id, name, _identity_no, _department, _title, region = emp
@@ -1384,6 +1851,27 @@ class PuantajApp(tk.Tk):
                 display = f"{name} ({region or '-'})"
             self.employee_display_names.append(display)
         self._refresh_employee_comboboxes()
+        if hasattr(self, "emp_stats"):
+            departments = {e[3] for e in employees if e[3]}
+            regions = {e[5] for e in employees if e[5]}
+            self._animate_stat(self.emp_stats["total"], len(employees), decimals=0)
+            self._animate_stat(self.emp_stats["departments"], len(departments), decimals=0)
+            self._animate_stat(self.emp_stats["regions"], len(regions), decimals=0)
+        if not self._auto_select_tree_first(self.employee_tree, self.on_employee_select):
+            if hasattr(self, "emp_detail_name"):
+                self.emp_detail_name.set("-")
+                self.emp_detail_identity.set("-")
+                self.emp_detail_dept.set("-")
+                self.emp_detail_title.set("-")
+                self.emp_detail_region.set("-")
+            if hasattr(self, "emp_recent_tree"):
+                for item in self.emp_recent_tree.get_children():
+                    self.emp_recent_tree.delete(item)
+
+    def _clear_employee_search(self):
+        if hasattr(self, "emp_search_var"):
+            self.emp_search_var.set("")
+        self.refresh_employees()
 
     def _refresh_employee_comboboxes(self):
         values = ["Tum Calisanlar"] + sorted(self.employee_display_names)
@@ -1391,6 +1879,14 @@ class PuantajApp(tk.Tk):
             self.ts_employee_combo["values"] = values
         if hasattr(self, "ts_filter_combo"):
             self.ts_filter_combo["values"] = values
+        if hasattr(self, "att_employee_combo"):
+            self.att_employee_combo["values"] = sorted(self.employee_display_names)
+        if hasattr(self, "att_filter_combo"):
+            self.att_filter_combo["values"] = values
+        if hasattr(self, "leave_employee_combo"):
+            self.leave_employee_combo["values"] = sorted(self.employee_display_names)
+        if hasattr(self, "leave_filter_combo"):
+            self.leave_filter_combo["values"] = values
         if hasattr(self, "report_employee_combo"):
             self.report_employee_combo["values"] = values
         if hasattr(self, "admin_employee_combo"):
@@ -1419,6 +1915,13 @@ class PuantajApp(tk.Tk):
         self.emp_identity_var.set(values[2])
         self.emp_department_var.set(values[3])
         self.emp_title_var.set(values[4])
+        if hasattr(self, "emp_detail_name"):
+            self.emp_detail_name.set(values[1])
+            self.emp_detail_identity.set(values[2] or "-")
+            self.emp_detail_dept.set(values[3] or "-")
+            self.emp_detail_title.set(values[4] or "-")
+            self.emp_detail_region.set(values[5] or "-")
+            self._refresh_employee_recent_timesheets(parse_int(values[0]))
 
     def add_or_update_employee(self):
         name = self.emp_name_var.get().strip()
@@ -1446,6 +1949,45 @@ class PuantajApp(tk.Tk):
         self.refresh_employees()
         self.clear_employee_form()
         self.trigger_sync("employee")
+
+    def _refresh_employee_recent_timesheets(self, employee_id):
+        if not hasattr(self, "emp_recent_tree"):
+            return
+        for item in self.emp_recent_tree.get_children():
+            self.emp_recent_tree.delete(item)
+        today = datetime.now().date()
+        month_start = today.replace(day=1).strftime("%Y-%m-%d")
+        month_end = today.strftime("%Y-%m-%d")
+        records = db.list_timesheets(
+            employee_id=employee_id,
+            start_date=month_start,
+            end_date=month_end,
+            region=self._view_region(),
+        )
+        records = sorted(records, key=lambda r: r[4], reverse=True)
+        for ts in records:
+            (
+                _ts_id,
+                _emp_id,
+                _name,
+                department,
+                work_date,
+                start_time,
+                end_time,
+                break_minutes,
+                is_special,
+                _notes,
+                _region,
+            ) = ts
+            try:
+                worked, _scheduled, overtime, _night, _overnight, _s1, _s2, _s3 = calc.calc_day_hours(
+                    work_date, start_time, end_time, break_minutes, self.settings, is_special, department
+                )
+            except Exception:
+                worked = overtime = ""
+            self.emp_recent_tree.insert("", tk.END, values=(work_date, worked, overtime))
+        if not records:
+            insert_empty_row(self.emp_recent_tree, ("date", "worked", "overtime"), "Kayit yok")
 
     def delete_employee(self):
         emp_id = self.emp_id_var.get().strip()
@@ -1522,12 +2064,17 @@ class PuantajApp(tk.Tk):
         ttk.Button(btn_row, text="Sil", command=self.delete_timesheet).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="Temizle", command=self.clear_timesheet_form).pack(side=tk.LEFT, padx=6)
         ttk.Button(btn_row, text="Excel/CSV Iceri Aktar", command=self.import_timesheets).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_row, text="Panodan Yapistir", command=self.paste_timesheets).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_row, text="Toplu Sablon Uygula", command=self.apply_template_to_selected).pack(
+            side=tk.LEFT, padx=6
+        )
 
         filter_frame = ttk.LabelFrame(self.tab_timesheets_body, text="Filtre", style="Section.TLabelframe")
         filter_frame.pack(fill=tk.X, padx=6, pady=6)
         self.ts_filter_employee = tk.StringVar(value="Tum Calisanlar")
         self.ts_filter_start = tk.StringVar()
         self.ts_filter_end = tk.StringVar()
+        self.ts_filter_limit_var = tk.StringVar(value="500")
 
         ttk.Label(filter_frame, text="Calisan").pack(side=tk.LEFT, padx=(0, 8))
         self.ts_filter_combo = ttk.Combobox(filter_frame, textvariable=self.ts_filter_employee, width=28, state="readonly")
@@ -1538,13 +2085,57 @@ class PuantajApp(tk.Tk):
         start_frame.pack(side=tk.LEFT, padx=6)
         end_frame, self.ts_filter_end_entry = create_labeled_date(filter_frame, "Bitis", self.ts_filter_end, 12)
         end_frame.pack(side=tk.LEFT, padx=6)
-        ttk.Button(filter_frame, text="Filtrele", command=self.refresh_timesheets).pack(side=tk.LEFT, padx=6)
-        ttk.Button(filter_frame, text="Temizle", command=self.clear_timesheet_filter).pack(side=tk.LEFT)
+        self.ts_filter_search_var = tk.StringVar()
+        ttk.Label(filter_frame, text="Ara").pack(side=tk.LEFT, padx=(12, 6))
+        ts_search_entry = ttk.Entry(filter_frame, textvariable=self.ts_filter_search_var, width=18)
+        ts_search_entry.pack(side=tk.LEFT)
+        ttk.Label(filter_frame, text="Limit").pack(side=tk.LEFT, padx=(12, 6))
+        ttk.Entry(filter_frame, textvariable=self.ts_filter_limit_var, width=6).pack(side=tk.LEFT)
+        btn_filter = ttk.Button(filter_frame, text="Filtrele", style="Accent.TButton", command=self.refresh_timesheets)
+        btn_filter.pack(side=tk.LEFT, padx=6)
+        attach_tooltip(ts_search_entry, "Calisan, not veya tarih")
+        attach_tooltip(btn_filter, "Secilen tarih araligini uygula")
+        btn_clear = ttk.Button(filter_frame, text="Temizle", command=self.clear_timesheet_filter)
+        btn_clear.pack(side=tk.LEFT)
+        attach_tooltip(btn_clear, "Filtreleri sifirla")
         clear_date_entry(self.ts_filter_start_entry)
         clear_date_entry(self.ts_filter_end_entry)
 
-        list_frame = ttk.Frame(self.tab_timesheets_body)
-        list_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        stats_row = ttk.Frame(self.tab_timesheets_body)
+        stats_row.pack(fill=tk.X, padx=6, pady=6)
+        self.ts_stats = {
+            "records": tk.StringVar(value="0"),
+            "worked": tk.StringVar(value="0"),
+            "overtime": tk.StringVar(value="0"),
+            "night": tk.StringVar(value="0"),
+            "sunday_days": tk.StringVar(value="0"),
+            "sunday_hours": tk.StringVar(value="0"),
+        }
+        create_kpi_card(stats_row, "Kayit", self.ts_stats["records"], theme=self._ui_theme).pack(side=tk.LEFT, padx=6)
+        create_kpi_card(stats_row, "Toplam Calisilan", self.ts_stats["worked"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+        create_kpi_card(stats_row, "Toplam Fazla Mesai", self.ts_stats["overtime"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+        create_kpi_card(stats_row, "Toplam Gece", self.ts_stats["night"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+        create_kpi_card(stats_row, "Pazar Gun", self.ts_stats["sunday_days"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+        create_kpi_card(stats_row, "Pazar Saat", self.ts_stats["sunday_hours"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+
+        pane = ttk.PanedWindow(self.tab_timesheets_body, orient=tk.HORIZONTAL)
+        pane.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        self.timesheet_pane = pane
+
+        list_frame = ttk.Frame(pane)
+        detail_frame = ttk.LabelFrame(pane, text="Detay", style="Section.TLabelframe")
+        pane.add(list_frame, weight=4)
+        pane.add(detail_frame, weight=2)
 
         columns = (
             "id",
@@ -1564,8 +2155,9 @@ class PuantajApp(tk.Tk):
             "special_night",
             "notes",
             "region",
+            "sunday_hours",
         )
-        self.timesheet_tree = ttk.Treeview(list_frame, columns=columns, show="headings")
+        self.timesheet_tree = ttk.Treeview(list_frame, columns=columns, show="headings", selectmode="extended")
         self.timesheet_tree.heading("id", text="ID")
         self.timesheet_tree.heading("employee", text="Calisan")
         self.timesheet_tree.heading("date", text="Tarih")
@@ -1583,6 +2175,7 @@ class PuantajApp(tk.Tk):
         self.timesheet_tree.heading("special_night", text="Ozel Gun Gece")
         self.timesheet_tree.heading("notes", text="Not")
         self.timesheet_tree.heading("region", text="Bolge")
+        self.timesheet_tree.heading("sunday_hours", text="Pazar Saat")
         self.timesheet_tree.column("id", width=60, anchor=tk.CENTER)
         self.timesheet_tree.column("employee", width=220)
         self.timesheet_tree.column("date", width=100)
@@ -1600,9 +2193,11 @@ class PuantajApp(tk.Tk):
         self.timesheet_tree.column("special_night", width=110)
         self.timesheet_tree.column("notes", width=180)
         self.timesheet_tree.column("region", width=100)
+        self.timesheet_tree.column("sunday_hours", width=100)
         # Koyu tema zebra satırları
         self.timesheet_tree.tag_configure("odd", background="#252525", foreground="#E0E0E0")
         self.timesheet_tree.tag_configure("even", background="#1F1F1F", foreground="#E0E0E0")
+        self.timesheet_tree.tag_configure("empty", background="#1F1F1F", foreground="#808080")
         ts_xscroll = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL, command=self.timesheet_tree.xview)
         ts_yscroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.timesheet_tree.yview)
         self.timesheet_tree.configure(xscrollcommand=ts_xscroll.set, yscrollcommand=ts_yscroll.set)
@@ -1612,11 +2207,66 @@ class PuantajApp(tk.Tk):
         ts_yscroll.grid(row=0, column=1, sticky="ns")
         ts_xscroll.grid(row=1, column=0, sticky="ew")
         self.timesheet_tree.bind("<<TreeviewSelect>>", self.on_timesheet_select)
+        self._apply_tree_zebra(self.timesheet_tree)
         self.timesheet_tree.bind("<Button-3>", self.on_timesheet_right_click)
 
+        # Detail panel
+        self.ts_detail_employee = tk.StringVar(value="-")
+        self.ts_detail_date = tk.StringVar(value="-")
+        self.ts_detail_hours = tk.StringVar(value="-")
+        self.ts_detail_overtime = tk.StringVar(value="-")
+        self.ts_detail_night = tk.StringVar(value="-")
+        self.ts_detail_notes = tk.StringVar(value="-")
+
+        d1 = ttk.Frame(detail_frame)
+        d1.pack(fill=tk.X, pady=4)
+        ttk.Label(d1, text="Calisan").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(d1, textvariable=self.ts_detail_employee).pack(side=tk.LEFT)
+
+        d2 = ttk.Frame(detail_frame)
+        d2.pack(fill=tk.X, pady=4)
+        ttk.Label(d2, text="Tarih").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(d2, textvariable=self.ts_detail_date).pack(side=tk.LEFT)
+
+        d3 = ttk.Frame(detail_frame)
+        d3.pack(fill=tk.X, pady=4)
+        ttk.Label(d3, text="Calisilan").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(d3, textvariable=self.ts_detail_hours).pack(side=tk.LEFT)
+
+        d4 = ttk.Frame(detail_frame)
+        d4.pack(fill=tk.X, pady=4)
+        ttk.Label(d4, text="Fazla Mesai").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(d4, textvariable=self.ts_detail_overtime).pack(side=tk.LEFT)
+
+        d5 = ttk.Frame(detail_frame)
+        d5.pack(fill=tk.X, pady=4)
+        ttk.Label(d5, text="Gece").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(d5, textvariable=self.ts_detail_night).pack(side=tk.LEFT)
+
+        d6 = ttk.Frame(detail_frame)
+        d6.pack(fill=tk.X, pady=4)
+        ttk.Label(d6, text="Not").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(d6, textvariable=self.ts_detail_notes, wraplength=220).pack(side=tk.LEFT)
+
+        quick_frame = ttk.LabelFrame(detail_frame, text="Hizli Duzenle", style="Section.TLabelframe")
+        quick_frame.pack(fill=tk.X, padx=6, pady=6)
+        self.ts_quick_start_var = tk.StringVar()
+        self.ts_quick_end_var = tk.StringVar()
+        self.ts_quick_break_var = tk.StringVar()
+        qrow = ttk.Frame(quick_frame)
+        qrow.pack(fill=tk.X, pady=4)
+        create_labeled_entry(qrow, "Giris", self.ts_quick_start_var, 8).pack(side=tk.LEFT, padx=6)
+        create_labeled_entry(qrow, "Cikis", self.ts_quick_end_var, 8).pack(side=tk.LEFT, padx=6)
+        create_labeled_entry(qrow, "Mola", self.ts_quick_break_var, 6).pack(side=tk.LEFT, padx=6)
+        ttk.Button(qrow, text="Uygula", style="Accent.TButton", command=self.quick_update_timesheet).pack(
+            side=tk.LEFT, padx=6
+        )
+
         self.ts_menu = tk.Menu(self, tearoff=0)
+
         self.ts_menu.add_command(label="Duzenle", command=self.edit_selected_timesheet)
         self.ts_menu.add_command(label="Sil", command=self.delete_timesheet)
+        self.after(120, lambda: self._set_pane_sash(self.timesheet_pane, 0.68))
 
     def clear_timesheet_form(self):
         self.ts_id_var.set("")
@@ -1635,12 +2285,152 @@ class PuantajApp(tk.Tk):
         self.ts_filter_employee.set("Tum Calisanlar")
         self.ts_filter_start.set("")
         self.ts_filter_end.set("")
+        if hasattr(self, "ts_filter_search_var"):
+            self.ts_filter_search_var.set("")
         clear_date_entry(self.ts_filter_start_entry)
         clear_date_entry(self.ts_filter_end_entry)
         self.refresh_timesheets()
 
     def on_timesheet_select(self, _event=None):
-        return
+        selected = self.timesheet_tree.selection()
+        if not selected:
+            return
+        values = self.timesheet_tree.item(selected[0], "values")
+        if not values:
+            return
+        if hasattr(self, "ts_detail_employee"):
+            self.ts_detail_employee.set(values[1])
+            self.ts_detail_date.set(values[2])
+            self.ts_detail_hours.set(values[6])
+            self.ts_detail_overtime.set(values[8])
+            self.ts_detail_night.set(values[9])
+            self.ts_detail_notes.set(values[15] or "-")
+        if hasattr(self, "ts_quick_start_var"):
+            self.ts_quick_start_var.set(values[3])
+            self.ts_quick_end_var.set(values[4])
+            self.ts_quick_break_var.set(values[5])
+
+    def quick_update_timesheet(self):
+        selected = self.timesheet_tree.selection()
+        if not selected:
+            messagebox.showwarning("Uyari", "Duzenlemek icin kayit secin.")
+            return
+        values = self.timesheet_tree.item(selected[0], "values")
+        ts_id = parse_int(values[0])
+        if not ts_id:
+            return
+        start_time = self.ts_quick_start_var.get().strip() or values[3]
+        end_time = self.ts_quick_end_var.get().strip() or values[4]
+        break_minutes = parse_int(self.ts_quick_break_var.get(), parse_int(values[5], 0))
+        try:
+            start_time = normalize_time(start_time)
+            end_time = normalize_time(end_time)
+        except ValueError as exc:
+            messagebox.showwarning("Uyari", str(exc))
+            return
+        region = values[16] if len(values) > 16 else ""
+        employee_id = self.employee_map.get((values[1], region)) or self.employee_map.get((values[1], ""))
+        if not employee_id:
+            messagebox.showwarning("Uyari", "Calisan bulunamadi.")
+            return
+        db.update_timesheet(
+            ts_id,
+            employee_id,
+            values[2],
+            start_time,
+            end_time,
+            break_minutes,
+            1 if values[11] == "Evet" else 0,
+            values[15],
+            region or self._entry_region(),
+        )
+        self.refresh_timesheets()
+        self.notify("Puantaj guncellendi.")
+
+    def apply_template_to_selected(self):
+        selected = self.timesheet_tree.selection()
+        if not selected:
+            messagebox.showwarning("Uyari", "Toplu islem icin kayit secin.")
+            return
+        tpl_name = self.ts_template_var.get().strip()
+        if not tpl_name or tpl_name not in getattr(self, "shift_template_map", {}):
+            messagebox.showwarning("Uyari", "Sablon secin.")
+            return
+        _tpl_id, _name, start_time, end_time, break_minutes = self.shift_template_map[tpl_name]
+        updated = 0
+        for item in selected:
+            values = self.timesheet_tree.item(item, "values")
+            ts_id = parse_int(values[0])
+            if not ts_id:
+                continue
+            region = values[16] if len(values) > 16 else ""
+            employee_id = self.employee_map.get((values[1], region)) or self.employee_map.get((values[1], ""))
+            if not employee_id:
+                continue
+            db.update_timesheet(
+                ts_id,
+                employee_id,
+                values[2],
+                start_time,
+                end_time,
+                break_minutes,
+                1 if values[11] == "Evet" else 0,
+                values[15],
+                region or self._entry_region(),
+            )
+            updated += 1
+        self.refresh_timesheets()
+        self.notify(f"{updated} kayit sablonla guncellendi.")
+
+    def paste_timesheets(self):
+        try:
+            raw = self.clipboard_get()
+        except Exception:
+            messagebox.showwarning("Uyari", "Pano bos.")
+            return
+        if not raw:
+            return
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        if not lines:
+            return
+        imported = 0
+        for line in lines:
+            parts = [p.strip() for p in line.replace(";", "\t").split("\t") if p.strip() != ""]
+            if len(parts) < 4:
+                parts = [p.strip() for p in line.split(",")]
+            if len(parts) < 4:
+                continue
+            name = parts[0]
+            work_date = parts[1]
+            start_time = parts[2]
+            end_time = parts[3]
+            break_minutes = parse_int(parts[4], 60) if len(parts) > 4 else 60
+            notes = parts[5] if len(parts) > 5 else ""
+            base, region = split_display_name(name, REGIONS)
+            employee_id = self.employee_map.get((base, region or "")) or self.employee_map.get(
+                (base, self._entry_region())
+            )
+            if not employee_id:
+                continue
+            try:
+                work_date = normalize_date(work_date)
+                start_time = normalize_time(start_time)
+                end_time = normalize_time(end_time)
+            except ValueError:
+                continue
+            db.add_timesheet(
+                employee_id,
+                work_date,
+                start_time,
+                end_time,
+                break_minutes,
+                0,
+                notes,
+                self._entry_region(),
+            )
+            imported += 1
+        self.refresh_timesheets()
+        self.notify(f"Pano girisi tamamlandi: {imported} kayit.")
 
     def on_timesheet_right_click(self, event):
         row_id = self.timesheet_tree.identify_row(event.y)
@@ -1699,8 +2489,32 @@ class PuantajApp(tk.Tk):
             end_date=end_date,
             region=self._view_region(),
         )
+        search = ""
+        if hasattr(self, "ts_filter_search_var"):
+            search = self.ts_filter_search_var.get().strip().lower()
+        total_worked = total_overtime = total_night = 0.0
+        total_sunday_hours = 0.0
+        sunday_day_keys = set()
+        shown = 0
+        limit = parse_int(self.ts_filter_limit_var.get(), 0) if hasattr(self, "ts_filter_limit_var") else 0
         for ts in records:
-            ts_id, _emp_id, name, work_date, start_time, end_time, break_minutes, is_special, notes, region = ts
+            (
+                ts_id,
+                _emp_id,
+                name,
+                department,
+                work_date,
+                start_time,
+                end_time,
+                break_minutes,
+                is_special,
+                notes,
+                region,
+            ) = ts
+            if search:
+                hay = " ".join([str(name), str(work_date), str(notes or "")]).lower()
+                if search not in hay:
+                    continue
             try:
                 (
                     worked,
@@ -1718,11 +2532,14 @@ class PuantajApp(tk.Tk):
                     break_minutes,
                     self.settings,
                     is_special,
+                    department,
                 )
+                sunday_hours = calc_sunday_separate_hours(work_date, department, is_special, worked)
             except Exception:
                 worked = scheduled = overtime = ""
                 night_hours = overnight_hours = ""
                 spec_norm = spec_ot = spec_night = ""
+                sunday_hours = ""
             tag = "odd" if len(self.timesheet_tree.get_children()) % 2 else "even"
             self.timesheet_tree.insert(
                 "",
@@ -1745,12 +2562,67 @@ class PuantajApp(tk.Tk):
                     spec_night,
                     notes or "",
                     region or "",
+                    sunday_hours,
                 ),
                 tags=(tag,),
             )
+            if worked != "":
+                total_worked += float(worked)
+            if overtime != "":
+                total_overtime += float(overtime)
+            if night_hours != "":
+                total_night += float(night_hours)
+            if sunday_hours != "":
+                sunday_float = float(sunday_hours)
+                if sunday_float > 0:
+                    total_sunday_hours += sunday_float
+                    sunday_day_keys.add((name, work_date, region or ""))
+            shown += 1
+            if limit and shown >= limit:
+                break
+        if not self.timesheet_tree.get_children():
+            insert_empty_row(
+                self.timesheet_tree,
+                (
+                    "id",
+                    "employee",
+                    "date",
+                    "start",
+                    "end",
+                    "break",
+                    "worked",
+                    "scheduled",
+                    "overtime",
+                    "night",
+                    "overnight",
+                    "special",
+                    "special_normal",
+                    "special_overtime",
+                    "special_night",
+                    "notes",
+                    "region",
+                    "sunday_hours",
+                ),
+                "Kayit yok",
+            )
+        if hasattr(self, "ts_stats"):
+            self._animate_stat(self.ts_stats["records"], shown, decimals=0)
+            self._animate_stat(self.ts_stats["worked"], total_worked, decimals=2)
+            self._animate_stat(self.ts_stats["overtime"], total_overtime, decimals=2)
+            self._animate_stat(self.ts_stats["night"], total_night, decimals=2)
+            self._animate_stat(self.ts_stats["sunday_days"], len(sunday_day_keys), decimals=0)
+            self._animate_stat(self.ts_stats["sunday_hours"], total_sunday_hours, decimals=2)
 
         if hasattr(self, "ts_filter_combo"):
             self.ts_filter_combo["values"] = ["Tum Calisanlar"] + sorted(self.employee_display_names)
+        if not self._auto_select_tree_first(self.timesheet_tree, self.on_timesheet_select):
+            if hasattr(self, "ts_detail_employee"):
+                self.ts_detail_employee.set("-")
+                self.ts_detail_date.set("-")
+                self.ts_detail_hours.set("-")
+                self.ts_detail_overtime.set("-")
+                self.ts_detail_night.set("-")
+                self.ts_detail_notes.set("-")
 
     def add_or_update_timesheet(self):
         name = self.ts_employee_var.get().strip()
@@ -1909,6 +2781,1110 @@ class PuantajApp(tk.Tk):
         set_time_vars(values[2], self.st_start_var)
         set_time_vars(values[3], self.st_end_var)
         self.st_break_var.set(values[4])
+
+    # Attendance & Leave tab
+    def _build_attendance_tab(self):
+        content = self.tab_attendance_body
+
+        attendance_frame = ttk.LabelFrame(content, text="Yoklama Kaydi", style="Section.TLabelframe")
+        attendance_frame.pack(fill=tk.X, padx=6, pady=6)
+
+        self.att_id_var = tk.StringVar()
+        self.att_employee_var = tk.StringVar()
+        self.att_date_var = tk.StringVar()
+        self.att_status_var = tk.StringVar(value=ATTENDANCE_STATUSES[0])
+        self.att_reason_var = tk.StringVar()
+
+        arow1 = ttk.Frame(attendance_frame)
+        arow1.pack(fill=tk.X, pady=4)
+        ttk.Label(arow1, text="Calisan").pack(side=tk.LEFT, padx=(0, 8))
+        self.att_employee_combo = ttk.Combobox(arow1, textvariable=self.att_employee_var, width=28, state="readonly")
+        self.att_employee_combo.pack(side=tk.LEFT)
+        date_frame, self.att_date_entry = create_labeled_date(arow1, "Tarih", self.att_date_var, 12)
+        date_frame.pack(side=tk.LEFT, padx=6)
+        ttk.Label(arow1, text="Durum").pack(side=tk.LEFT, padx=(12, 6))
+        self.att_status_combo = ttk.Combobox(
+            arow1, textvariable=self.att_status_var, values=ATTENDANCE_STATUSES, width=14, state="readonly"
+        )
+        self.att_status_combo.pack(side=tk.LEFT)
+
+        arow2 = ttk.Frame(attendance_frame)
+        arow2.pack(fill=tk.X, pady=4)
+        create_labeled_entry(arow2, "Neden", self.att_reason_var, 60).pack(side=tk.LEFT, padx=6)
+
+        abtn = ttk.Frame(attendance_frame)
+        abtn.pack(fill=tk.X, pady=6)
+        btn_att_save = ttk.Button(abtn, text="Kaydet", style="Accent.TButton", command=self.add_or_update_attendance)
+        btn_att_save.pack(side=tk.LEFT, padx=6)
+        attach_tooltip(btn_att_save, "Yoklama kaydini kaydet")
+        btn_att_delete = ttk.Button(abtn, text="Sil", command=self.delete_attendance)
+        btn_att_delete.pack(side=tk.LEFT)
+        attach_tooltip(btn_att_delete, "Secili yoklama kaydini sil")
+        btn_att_clear = ttk.Button(abtn, text="Temizle", command=self.clear_attendance_form)
+        btn_att_clear.pack(side=tk.LEFT, padx=6)
+        attach_tooltip(btn_att_clear, "Formu sifirla")
+
+        att_filter = ttk.LabelFrame(content, text="Yoklama Filtre", style="Section.TLabelframe")
+        att_filter.pack(fill=tk.X, padx=6, pady=6)
+        self.att_filter_employee_var = tk.StringVar(value="Tum Calisanlar")
+        self.att_filter_status_var = tk.StringVar(value="Tum Durumlar")
+        self.att_filter_start_var = tk.StringVar()
+        self.att_filter_end_var = tk.StringVar()
+
+        ttk.Label(att_filter, text="Calisan").pack(side=tk.LEFT, padx=(0, 8))
+        self.att_filter_combo = ttk.Combobox(
+            att_filter, textvariable=self.att_filter_employee_var, width=24, state="readonly"
+        )
+        self.att_filter_combo.pack(side=tk.LEFT)
+        ttk.Label(att_filter, text="Durum").pack(side=tk.LEFT, padx=(12, 6))
+        self.att_filter_status_combo = ttk.Combobox(
+            att_filter,
+            textvariable=self.att_filter_status_var,
+            values=["Tum Durumlar"] + ATTENDANCE_STATUSES,
+            width=14,
+            state="readonly",
+        )
+        self.att_filter_status_combo.pack(side=tk.LEFT)
+        start_frame, self.att_filter_start_entry = create_labeled_date(
+            att_filter, "Baslangic", self.att_filter_start_var, 12
+        )
+        start_frame.pack(side=tk.LEFT, padx=6)
+        end_frame, self.att_filter_end_entry = create_labeled_date(att_filter, "Bitis", self.att_filter_end_var, 12)
+        end_frame.pack(side=tk.LEFT, padx=6)
+        self.att_filter_search_var = tk.StringVar()
+        ttk.Label(att_filter, text="Ara").pack(side=tk.LEFT, padx=(12, 6))
+        att_search_entry = ttk.Entry(att_filter, textvariable=self.att_filter_search_var, width=16)
+        att_search_entry.pack(side=tk.LEFT)
+        btn_att_refresh = ttk.Button(att_filter, text="Guncelle", style="Accent.TButton", command=self.refresh_attendance)
+        btn_att_refresh.pack(side=tk.LEFT, padx=6)
+        attach_tooltip(att_search_entry, "Calisan, neden veya tarih")
+        attach_tooltip(btn_att_refresh, "Yoklama listesini yenile")
+        btn_att_clear = ttk.Button(att_filter, text="Temizle", command=self.clear_attendance_filter)
+        btn_att_clear.pack(side=tk.LEFT)
+        attach_tooltip(btn_att_clear, "Filtreleri sifirla")
+        ttk.Button(att_filter, text="Toplu Durum", command=self.bulk_update_attendance_status).pack(
+            side=tk.LEFT, padx=6
+        )
+        clear_date_entry(self.att_filter_start_entry)
+        clear_date_entry(self.att_filter_end_entry)
+
+        att_stats_row = ttk.Frame(content)
+        att_stats_row.pack(fill=tk.X, padx=6, pady=6)
+        self.att_stats = {
+            "total": tk.StringVar(value="0"),
+            "worked": tk.StringVar(value="0"),
+            "leave": tk.StringVar(value="0"),
+            "absent": tk.StringVar(value="0"),
+        }
+        create_kpi_card(att_stats_row, "Toplam", self.att_stats["total"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+        create_kpi_card(att_stats_row, "Calisti", self.att_stats["worked"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+        create_kpi_card(att_stats_row, "Izinli", self.att_stats["leave"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+        create_kpi_card(att_stats_row, "Gelmedi", self.att_stats["absent"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+
+        pane = ttk.PanedWindow(content, orient=tk.HORIZONTAL)
+        pane.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        list_frame = ttk.Frame(pane)
+        detail_frame = ttk.LabelFrame(pane, text="Detay", style="Section.TLabelframe")
+        pane.add(list_frame, weight=4)
+        pane.add(detail_frame, weight=2)
+        columns = ("id", "date", "employee", "status", "reason", "source", "region")
+        self.attendance_tree = ttk.Treeview(list_frame, columns=columns, show="headings")
+        self.attendance_tree.heading("id", text="ID")
+        self.attendance_tree.heading("date", text="Tarih")
+        self.attendance_tree.heading("employee", text="Calisan")
+        self.attendance_tree.heading("status", text="Durum")
+        self.attendance_tree.heading("reason", text="Neden")
+        self.attendance_tree.heading("source", text="Kaynak")
+        self.attendance_tree.heading("region", text="Bolge")
+        self.attendance_tree.column("id", width=60, anchor=tk.CENTER)
+        self.attendance_tree.column("date", width=100)
+        self.attendance_tree.column("employee", width=220)
+        self.attendance_tree.column("status", width=120)
+        self.attendance_tree.column("reason", width=240)
+        self.attendance_tree.column("source", width=110)
+        self.attendance_tree.column("region", width=90)
+        self.attendance_tree.tag_configure("odd", background="#252525", foreground="#E0E0E0")
+        self.attendance_tree.tag_configure("even", background="#1F1F1F", foreground="#E0E0E0")
+        self.attendance_tree.tag_configure("empty", background="#1F1F1F", foreground="#808080")
+        att_xscroll = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL, command=self.attendance_tree.xview)
+        att_yscroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.attendance_tree.yview)
+        self.attendance_tree.configure(xscrollcommand=att_xscroll.set, yscrollcommand=att_yscroll.set)
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
+        self.attendance_tree.grid(row=0, column=0, sticky="nsew")
+        att_yscroll.grid(row=0, column=1, sticky="ns")
+        att_xscroll.grid(row=1, column=0, sticky="ew")
+        self.attendance_tree.bind("<<TreeviewSelect>>", self.on_attendance_select)
+        self._apply_tree_zebra(self.attendance_tree)
+
+        self.att_detail_employee = tk.StringVar(value="-")
+        self.att_detail_date = tk.StringVar(value="-")
+        self.att_detail_status = tk.StringVar(value="-")
+        self.att_detail_reason = tk.StringVar(value="-")
+        self.att_detail_source = tk.StringVar(value="-")
+
+        d1 = ttk.Frame(detail_frame); d1.pack(fill=tk.X, pady=4)
+        ttk.Label(d1, text="Calisan").pack(side=tk.LEFT, padx=(0,6))
+        ttk.Label(d1, textvariable=self.att_detail_employee).pack(side=tk.LEFT)
+        d2 = ttk.Frame(detail_frame); d2.pack(fill=tk.X, pady=4)
+        ttk.Label(d2, text="Tarih").pack(side=tk.LEFT, padx=(0,6))
+        ttk.Label(d2, textvariable=self.att_detail_date).pack(side=tk.LEFT)
+        d3 = ttk.Frame(detail_frame); d3.pack(fill=tk.X, pady=4)
+        ttk.Label(d3, text="Durum").pack(side=tk.LEFT, padx=(0,6))
+        ttk.Label(d3, textvariable=self.att_detail_status).pack(side=tk.LEFT)
+        d4 = ttk.Frame(detail_frame); d4.pack(fill=tk.X, pady=4)
+        ttk.Label(d4, text="Neden").pack(side=tk.LEFT, padx=(0,6))
+        ttk.Label(d4, textvariable=self.att_detail_reason, wraplength=220).pack(side=tk.LEFT)
+        d5 = ttk.Frame(detail_frame); d5.pack(fill=tk.X, pady=4)
+        ttk.Label(d5, text="Kaynak").pack(side=tk.LEFT, padx=(0,6))
+        ttk.Label(d5, textvariable=self.att_detail_source).pack(side=tk.LEFT)
+
+        self._apply_tree_zebra(self.attendance_tree)
+
+        leave_frame = ttk.LabelFrame(content, text="Izin Kaydi", style="Section.TLabelframe")
+        leave_frame.pack(fill=tk.X, padx=6, pady=6)
+
+        self.leave_id_var = tk.StringVar()
+        self.leave_employee_var = tk.StringVar()
+        self.leave_start_var = tk.StringVar()
+        self.leave_end_var = tk.StringVar()
+        self.leave_type_var = tk.StringVar(value=LEAVE_TYPES[0])
+        self.leave_status_var = tk.StringVar(value="Onayli")
+        self.leave_reason_var = tk.StringVar()
+        self.leave_doc_no_var = tk.StringVar()
+        self.leave_apply_attendance_var = tk.BooleanVar(value=True)
+        self.leave_document_path = ""
+
+        lrow1 = ttk.Frame(leave_frame)
+        lrow1.pack(fill=tk.X, pady=4)
+        ttk.Label(lrow1, text="Calisan").pack(side=tk.LEFT, padx=(0, 8))
+        self.leave_employee_combo = ttk.Combobox(lrow1, textvariable=self.leave_employee_var, width=28, state="readonly")
+        self.leave_employee_combo.pack(side=tk.LEFT)
+        lstart_frame, self.leave_start_entry = create_labeled_date(lrow1, "Baslangic", self.leave_start_var, 12)
+        lstart_frame.pack(side=tk.LEFT, padx=6)
+        lend_frame, self.leave_end_entry = create_labeled_date(lrow1, "Bitis", self.leave_end_var, 12)
+        lend_frame.pack(side=tk.LEFT, padx=6)
+        ttk.Label(lrow1, text="Tip").pack(side=tk.LEFT, padx=(12, 6))
+        ttk.Combobox(lrow1, textvariable=self.leave_type_var, values=LEAVE_TYPES, width=14, state="readonly").pack(
+            side=tk.LEFT
+        )
+        ttk.Label(lrow1, text="Durum").pack(side=tk.LEFT, padx=(12, 6))
+        status_combo = ttk.Combobox(
+            lrow1, textvariable=self.leave_status_var, values=LEAVE_STATUSES, width=12, state="readonly"
+        )
+        status_combo.pack(side=tk.LEFT)
+        status_combo.configure(state="disabled")
+
+        lrow2 = ttk.Frame(leave_frame)
+        lrow2.pack(fill=tk.X, pady=4)
+        create_labeled_entry(lrow2, "Neden", self.leave_reason_var, 50).pack(side=tk.LEFT, padx=6)
+        create_labeled_entry(lrow2, "Belge No", self.leave_doc_no_var, 16).pack(side=tk.LEFT, padx=6)
+        ttk.Checkbutton(lrow2, text="Yoklamaya isle", variable=self.leave_apply_attendance_var).pack(
+            side=tk.LEFT, padx=8
+        )
+
+        lbtn = ttk.Frame(leave_frame)
+        lbtn.pack(fill=tk.X, pady=6)
+        btn_leave_save = ttk.Button(lbtn, text="Kaydet", style="Accent.TButton", command=self.add_or_update_leave)
+        btn_leave_save.pack(
+            side=tk.LEFT, padx=6
+        )
+        attach_tooltip(btn_leave_save, "Izin kaydini kaydet")
+        btn_leave_delete = ttk.Button(lbtn, text="Sil", command=self.delete_leave)
+        btn_leave_delete.pack(side=tk.LEFT)
+        attach_tooltip(btn_leave_delete, "Secili izin kaydini sil")
+        btn_leave_clear = ttk.Button(lbtn, text="Temizle", command=self.clear_leave_form)
+        btn_leave_clear.pack(side=tk.LEFT, padx=6)
+        attach_tooltip(btn_leave_clear, "Formu sifirla")
+        btn_leave_form = ttk.Button(lbtn, text="Izin Formu Olustur", command=self.generate_leave_form)
+        btn_leave_form.pack(side=tk.LEFT, padx=6)
+        attach_tooltip(btn_leave_form, "Izin formunu Excel olarak olustur")
+        btn_leave_open = ttk.Button(lbtn, text="Belgeyi Ac", command=self.open_leave_document)
+        btn_leave_open.pack(side=tk.LEFT, padx=6)
+        attach_tooltip(btn_leave_open, "Kayitli izin belgesini ac")
+
+        leave_filter = ttk.LabelFrame(content, text="Izin Filtre", style="Section.TLabelframe")
+        leave_filter.pack(fill=tk.X, padx=6, pady=6)
+        self.leave_filter_employee_var = tk.StringVar(value="Tum Calisanlar")
+        self.leave_filter_status_var = tk.StringVar(value="Tum Durumlar")
+        self.leave_filter_start_var = tk.StringVar()
+        self.leave_filter_end_var = tk.StringVar()
+
+        ttk.Label(leave_filter, text="Calisan").pack(side=tk.LEFT, padx=(0, 8))
+        self.leave_filter_combo = ttk.Combobox(
+            leave_filter, textvariable=self.leave_filter_employee_var, width=24, state="readonly"
+        )
+        self.leave_filter_combo.pack(side=tk.LEFT)
+        ttk.Label(leave_filter, text="Durum").pack(side=tk.LEFT, padx=(12, 6))
+        ttk.Combobox(
+            leave_filter,
+            textvariable=self.leave_filter_status_var,
+            values=["Tum Durumlar"] + LEAVE_STATUSES,
+            width=14,
+            state="readonly",
+        ).pack(side=tk.LEFT)
+        lstart_filter, self.leave_filter_start_entry = create_labeled_date(
+            leave_filter, "Baslangic", self.leave_filter_start_var, 12
+        )
+        lstart_filter.pack(side=tk.LEFT, padx=6)
+        lend_filter, self.leave_filter_end_entry = create_labeled_date(
+            leave_filter, "Bitis", self.leave_filter_end_var, 12
+        )
+        lend_filter.pack(side=tk.LEFT, padx=6)
+        self.leave_filter_search_var = tk.StringVar()
+        ttk.Label(leave_filter, text="Ara").pack(side=tk.LEFT, padx=(12, 6))
+        leave_search_entry = ttk.Entry(leave_filter, textvariable=self.leave_filter_search_var, width=16)
+        leave_search_entry.pack(side=tk.LEFT)
+        btn_leave_refresh = ttk.Button(
+            leave_filter, text="Guncelle", style="Accent.TButton", command=self.refresh_leave_records
+        )
+        btn_leave_refresh.pack(side=tk.LEFT, padx=6)
+        attach_tooltip(leave_search_entry, "Calisan, neden veya tarih")
+        attach_tooltip(btn_leave_refresh, "Izin listesini yenile")
+        btn_leave_clear = ttk.Button(leave_filter, text="Temizle", command=self.clear_leave_filter)
+        btn_leave_clear.pack(side=tk.LEFT)
+        attach_tooltip(btn_leave_clear, "Filtreleri sifirla")
+        clear_date_entry(self.leave_filter_start_entry)
+        clear_date_entry(self.leave_filter_end_entry)
+
+        leave_stats_row = ttk.Frame(content)
+        leave_stats_row.pack(fill=tk.X, padx=6, pady=6)
+        self.leave_stats = {
+            "total_days": tk.StringVar(value="0"),
+            "approved": tk.StringVar(value="0"),
+            "active": tk.StringVar(value="0"),
+        }
+        create_kpi_card(leave_stats_row, "Toplam Izin (Gun)", self.leave_stats["total_days"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+        create_kpi_card(leave_stats_row, "Onayli Kayit", self.leave_stats["approved"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+        create_kpi_card(leave_stats_row, "Aktif Izinli", self.leave_stats["active"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+
+        leave_pane = ttk.PanedWindow(content, orient=tk.HORIZONTAL)
+        leave_pane.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        leave_list_frame = ttk.Frame(leave_pane)
+        leave_detail_frame = ttk.LabelFrame(leave_pane, text="Detay", style="Section.TLabelframe")
+        leave_pane.add(leave_list_frame, weight=4)
+        leave_pane.add(leave_detail_frame, weight=2)
+        leave_columns = ("id", "employee", "start", "end", "days", "type", "status", "reason", "doc_no", "region")
+        self.leave_tree = ttk.Treeview(leave_list_frame, columns=leave_columns, show="headings")
+        self.leave_tree.heading("id", text="ID")
+        self.leave_tree.heading("employee", text="Calisan")
+        self.leave_tree.heading("start", text="Baslangic")
+        self.leave_tree.heading("end", text="Bitis")
+        self.leave_tree.heading("days", text="Gun")
+        self.leave_tree.heading("type", text="Tip")
+        self.leave_tree.heading("status", text="Durum")
+        self.leave_tree.heading("reason", text="Neden")
+        self.leave_tree.heading("doc_no", text="Belge No")
+        self.leave_tree.heading("region", text="Bolge")
+        self.leave_tree.column("id", width=60, anchor=tk.CENTER)
+        self.leave_tree.column("employee", width=220)
+        self.leave_tree.column("start", width=100)
+        self.leave_tree.column("end", width=100)
+        self.leave_tree.column("days", width=70, anchor=tk.CENTER)
+        self.leave_tree.column("type", width=120)
+        self.leave_tree.column("status", width=100)
+        self.leave_tree.column("reason", width=220)
+        self.leave_tree.column("doc_no", width=110)
+        self.leave_tree.column("region", width=90)
+        self.leave_tree.tag_configure("odd", background="#252525", foreground="#E0E0E0")
+        self.leave_tree.tag_configure("even", background="#1F1F1F", foreground="#E0E0E0")
+        self.leave_tree.tag_configure("empty", background="#1F1F1F", foreground="#808080")
+        leave_xscroll = ttk.Scrollbar(leave_list_frame, orient=tk.HORIZONTAL, command=self.leave_tree.xview)
+        leave_yscroll = ttk.Scrollbar(leave_list_frame, orient=tk.VERTICAL, command=self.leave_tree.yview)
+        self.leave_tree.configure(xscrollcommand=leave_xscroll.set, yscrollcommand=leave_yscroll.set)
+        leave_list_frame.columnconfigure(0, weight=1)
+        leave_list_frame.rowconfigure(0, weight=1)
+        self.leave_tree.grid(row=0, column=0, sticky="nsew")
+        leave_yscroll.grid(row=0, column=1, sticky="ns")
+        leave_xscroll.grid(row=1, column=0, sticky="ew")
+        self.leave_tree.bind("<<TreeviewSelect>>", self.on_leave_select)
+        self._apply_tree_zebra(self.leave_tree)
+
+        self.leave_detail_employee = tk.StringVar(value="-")
+        self.leave_detail_dates = tk.StringVar(value="-")
+        self.leave_detail_type = tk.StringVar(value="-")
+        self.leave_detail_status = tk.StringVar(value="-")
+        self.leave_detail_reason = tk.StringVar(value="-")
+        self.leave_detail_doc = tk.StringVar(value="-")
+
+        l1 = ttk.Frame(leave_detail_frame); l1.pack(fill=tk.X, pady=4)
+        ttk.Label(l1, text="Calisan").pack(side=tk.LEFT, padx=(0,6))
+        ttk.Label(l1, textvariable=self.leave_detail_employee).pack(side=tk.LEFT)
+        l2 = ttk.Frame(leave_detail_frame); l2.pack(fill=tk.X, pady=4)
+        ttk.Label(l2, text="Tarih").pack(side=tk.LEFT, padx=(0,6))
+        ttk.Label(l2, textvariable=self.leave_detail_dates).pack(side=tk.LEFT)
+        l3 = ttk.Frame(leave_detail_frame); l3.pack(fill=tk.X, pady=4)
+        ttk.Label(l3, text="Tip").pack(side=tk.LEFT, padx=(0,6))
+        ttk.Label(l3, textvariable=self.leave_detail_type).pack(side=tk.LEFT)
+        l4 = ttk.Frame(leave_detail_frame); l4.pack(fill=tk.X, pady=4)
+        ttk.Label(l4, text="Durum").pack(side=tk.LEFT, padx=(0,6))
+        ttk.Label(l4, textvariable=self.leave_detail_status).pack(side=tk.LEFT)
+        l5 = ttk.Frame(leave_detail_frame); l5.pack(fill=tk.X, pady=4)
+        ttk.Label(l5, text="Belge").pack(side=tk.LEFT, padx=(0,6))
+        ttk.Label(l5, textvariable=self.leave_detail_doc).pack(side=tk.LEFT)
+        l6 = ttk.Frame(leave_detail_frame); l6.pack(fill=tk.X, pady=4)
+        ttk.Label(l6, text="Neden").pack(side=tk.LEFT, padx=(0,6))
+        ttk.Label(l6, textvariable=self.leave_detail_reason, wraplength=220).pack(side=tk.LEFT)
+
+        history_frame = ttk.LabelFrame(leave_detail_frame, text="Durum Gecmisi", style="Section.TLabelframe")
+        history_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        self.leave_history_tree = ttk.Treeview(
+            history_frame,
+            columns=("status", "note", "user", "date"),
+            show="headings",
+            height=6,
+        )
+        self.leave_history_tree.heading("status", text="Durum")
+        self.leave_history_tree.heading("note", text="Not")
+        self.leave_history_tree.heading("user", text="Kisi")
+        self.leave_history_tree.heading("date", text="Tarih")
+        self.leave_history_tree.column("status", width=90)
+        self.leave_history_tree.column("note", width=160)
+        self.leave_history_tree.column("user", width=100)
+        self.leave_history_tree.column("date", width=130)
+        self.leave_history_tree.pack(fill=tk.BOTH, expand=True)
+        self._apply_tree_zebra(self.leave_history_tree)
+
+        self._apply_tree_zebra(self.leave_tree)
+
+        totals_frame = ttk.LabelFrame(content, text="Izin Toplamlari", style="Section.TLabelframe")
+        totals_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        self.leave_totals_tree = ttk.Treeview(totals_frame, columns=("employee", "days"), show="headings", height=6)
+        self.leave_totals_tree.heading("employee", text="Calisan")
+        self.leave_totals_tree.heading("days", text="Toplam Gun")
+        self.leave_totals_tree.column("employee", width=220)
+        self.leave_totals_tree.column("days", width=120, anchor=tk.CENTER)
+        totals_xscroll = ttk.Scrollbar(totals_frame, orient=tk.HORIZONTAL, command=self.leave_totals_tree.xview)
+        totals_yscroll = ttk.Scrollbar(totals_frame, orient=tk.VERTICAL, command=self.leave_totals_tree.yview)
+        self.leave_totals_tree.configure(xscrollcommand=totals_xscroll.set, yscrollcommand=totals_yscroll.set)
+        totals_frame.columnconfigure(0, weight=1)
+        totals_frame.rowconfigure(0, weight=1)
+        self.leave_totals_tree.grid(row=0, column=0, sticky="nsew")
+        self._apply_tree_zebra(self.leave_totals_tree)
+        totals_yscroll.grid(row=0, column=1, sticky="ns")
+        totals_xscroll.grid(row=1, column=0, sticky="ew")
+
+    def clear_attendance_form(self):
+        self.att_id_var.set("")
+        self.att_employee_var.set("")
+        self.att_date_var.set("")
+        self.att_status_var.set(ATTENDANCE_STATUSES[0])
+        self.att_reason_var.set("")
+
+    def clear_attendance_filter(self):
+        self.att_filter_employee_var.set("Tum Calisanlar")
+        self.att_filter_status_var.set("Tum Durumlar")
+        self.att_filter_start_var.set("")
+        self.att_filter_end_var.set("")
+        if hasattr(self, "att_filter_search_var"):
+            self.att_filter_search_var.set("")
+        clear_date_entry(self.att_filter_start_entry)
+        clear_date_entry(self.att_filter_end_entry)
+        self.refresh_attendance()
+
+    def on_attendance_select(self, _event=None):
+        selected = self.attendance_tree.selection()
+        if not selected:
+            return
+        values = self.attendance_tree.item(selected[0], "values")
+        att_id = values[0]
+        if att_id:
+            self.att_id_var.set(att_id)
+        else:
+            self.att_id_var.set("")
+        self.att_employee_var.set(values[2])
+        self.att_date_var.set(values[1])
+        self.att_status_var.set(values[3])
+        self.att_reason_var.set(values[4])
+        if hasattr(self, "att_detail_employee"):
+            self.att_detail_employee.set(values[2])
+            self.att_detail_date.set(values[1])
+            self.att_detail_status.set(values[3])
+            self.att_detail_reason.set(values[4] or "-")
+            self.att_detail_source.set(values[5] or "-")
+
+    def add_or_update_attendance(self):
+        name = self.att_employee_var.get().strip()
+        if not name:
+            messagebox.showwarning("Uyari", "Calisan secin.")
+            return
+        base, region = split_display_name(name, REGIONS)
+        if region is None:
+            employee_id = self.employee_map.get((base, "")) or self.employee_map.get((base, self._entry_region()))
+        else:
+            employee_id = self.employee_map.get((base, region))
+        if not employee_id:
+            messagebox.showwarning("Uyari", "Calisan bulunamadi.")
+            return
+        work_date = self.att_date_var.get().strip()
+        if not work_date:
+            messagebox.showwarning("Uyari", "Tarih zorunlu.")
+            return
+        try:
+            work_date = normalize_date(work_date)
+        except ValueError as exc:
+            messagebox.showwarning("Uyari", str(exc))
+            return
+        status = self.att_status_var.get().strip() or "Calisti"
+        reason = self.att_reason_var.get().strip()
+        db.upsert_attendance_record(employee_id, work_date, status, reason, self._entry_region(), "Yoklama")
+        self._log_action("attendance_save", f"employee_id={employee_id} date={work_date} status={status}")
+        self.refresh_attendance()
+        self.clear_attendance_form()
+        self.notify("Yoklama kaydedildi.")
+
+    def delete_attendance(self):
+        att_id = self.att_id_var.get().strip()
+        if not att_id:
+            selected = self.attendance_tree.selection()
+            if selected:
+                values = self.attendance_tree.item(selected[0], "values")
+                att_id = values[0]
+        if not att_id:
+            messagebox.showwarning("Uyari", "Silmek icin yoklama secin.")
+            return
+        if messagebox.askyesno("Onay", "Yoklama kaydini silmek istiyor musunuz?"):
+            db.delete_attendance_record(parse_int(att_id))
+            self._log_action("attendance_delete", f"id={att_id}")
+            self.refresh_attendance()
+            self.clear_attendance_form()
+
+    def bulk_update_attendance_status(self):
+        selected = self.attendance_tree.selection()
+        if not selected:
+            messagebox.showinfo("Bilgi", "Toplu islem icin satir secin.")
+            return
+
+        dialog = tk.Toplevel(self)
+        dialog.title("Toplu Durum")
+        dialog.geometry("360x200")
+        dialog.transient(self)
+        dialog.grab_set()
+
+        status_var = tk.StringVar(value=ATTENDANCE_STATUSES[0])
+        reason_var = tk.StringVar()
+
+        row1 = ttk.Frame(dialog)
+        row1.pack(fill=tk.X, pady=8, padx=10)
+        ttk.Label(row1, text="Durum").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Combobox(row1, textvariable=status_var, values=ATTENDANCE_STATUSES, state="readonly").pack(
+            side=tk.LEFT
+        )
+
+        row2 = ttk.Frame(dialog)
+        row2.pack(fill=tk.X, pady=8, padx=10)
+        ttk.Label(row2, text="Neden").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Entry(row2, textvariable=reason_var, width=30).pack(side=tk.LEFT)
+
+        def apply_bulk():
+            status = status_var.get().strip()
+            reason = reason_var.get().strip()
+            for item in selected:
+                values = self.attendance_tree.item(item, "values")
+                name = values[2]
+                work_date = values[1]
+                region = values[6] if len(values) > 6 else ""
+                base, reg = split_display_name(name, REGIONS)
+                region_key = reg if reg is not None else (region or self._entry_region())
+                employee_id = self.employee_map.get((base, region_key)) or self.employee_map.get((base, ""))
+                if not employee_id:
+                    continue
+                db.upsert_attendance_record(employee_id, work_date, status, reason, region_key, "Toplu")
+            dialog.destroy()
+            self.refresh_attendance()
+            self.notify("Toplu yoklama guncellendi.")
+
+        btn_row = ttk.Frame(dialog)
+        btn_row.pack(fill=tk.X, pady=12, padx=10)
+        ttk.Button(btn_row, text="Uygula", style="Accent.TButton", command=apply_bulk).pack(side=tk.LEFT, padx=6)
+        ttk.Button(btn_row, text="Iptal", command=dialog.destroy).pack(side=tk.LEFT)
+
+    def refresh_attendance(self):
+        if not hasattr(self, "attendance_tree"):
+            return
+        for item in self.attendance_tree.get_children():
+            self.attendance_tree.delete(item)
+
+        employee_name = self.att_filter_employee_var.get().strip()
+        employee_id = None
+        if employee_name and employee_name != "Tum Calisanlar":
+            base, region = split_display_name(employee_name, REGIONS)
+            if region is None:
+                employee_id = self.employee_map.get((base, "")) or self.employee_map.get(
+                    (base, self._entry_region())
+                )
+            else:
+                employee_id = self.employee_map.get((base, region))
+
+        status_filter = self.att_filter_status_var.get().strip()
+        start_date = self.att_filter_start_var.get().strip() or None
+        end_date = self.att_filter_end_var.get().strip() or None
+        search = ""
+        if hasattr(self, "att_filter_search_var"):
+            search = self.att_filter_search_var.get().strip().lower()
+        try:
+            if start_date:
+                start_date = normalize_date(start_date)
+            if end_date:
+                end_date = normalize_date(end_date)
+        except ValueError as exc:
+            messagebox.showwarning("Uyari", str(exc))
+            return
+
+        merged = {}
+        ts_records = db.list_timesheets(
+            employee_id=employee_id,
+            start_date=start_date,
+            end_date=end_date,
+            region=self._view_region(),
+        )
+        for (
+            _ts_id,
+            emp_id,
+            name,
+            _department,
+            work_date,
+            _start_time,
+            _end_time,
+            _break_minutes,
+            _is_special,
+            _notes,
+            region,
+        ) in ts_records:
+            key = (emp_id, work_date)
+            merged[key] = {
+                "id": "",
+                "date": work_date,
+                "employee": name,
+                "status": "Calisti",
+                "reason": "Puantaj",
+                "source": "Puantaj",
+                "region": region or "",
+            }
+
+        attendance_records = db.list_attendance_records(
+            employee_id=employee_id,
+            start_date=start_date,
+            end_date=end_date,
+            status=None if status_filter == "Tum Durumlar" else status_filter,
+            region=self._view_region(),
+        )
+        for att in attendance_records:
+            att_id, emp_id, name, work_date, status, reason, source, region = att
+            key = (emp_id, work_date)
+            merged[key] = {
+                "id": att_id,
+                "date": work_date,
+                "employee": name,
+                "status": status,
+                "reason": reason or "",
+                "source": source or "Yoklama",
+                "region": region or "",
+            }
+
+        rows = list(merged.values())
+        if status_filter and status_filter != "Tum Durumlar":
+            rows = [row for row in rows if row["status"] == status_filter]
+        if search:
+            rows = [
+                row
+                for row in rows
+                if search in " ".join([row["employee"], row["date"], row["reason"]]).lower()
+            ]
+
+        rows.sort(key=lambda r: r["date"], reverse=True)
+        total = worked = leave = absent = 0
+        for row in rows:
+            tag = "odd" if len(self.attendance_tree.get_children()) % 2 else "even"
+            self.attendance_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    row["id"],
+                    row["date"],
+                    row["employee"],
+                    row["status"],
+                    row["reason"],
+                    row["source"],
+                    row["region"],
+                ),
+                tags=(tag,),
+            )
+            total += 1
+            if row["status"] == "Calisti":
+                worked += 1
+            elif row["status"] == "Izinli":
+                leave += 1
+            elif row["status"] == "Gelmedi":
+                absent += 1
+        if not self.attendance_tree.get_children():
+            insert_empty_row(
+                self.attendance_tree,
+                ("id", "date", "employee", "status", "reason", "source", "region"),
+                "Kayit yok",
+            )
+        if hasattr(self, "att_stats"):
+            self._animate_stat(self.att_stats["total"], total, decimals=0)
+            self._animate_stat(self.att_stats["worked"], worked, decimals=0)
+            self._animate_stat(self.att_stats["leave"], leave, decimals=0)
+            self._animate_stat(self.att_stats["absent"], absent, decimals=0)
+        if not self._auto_select_tree_first(self.attendance_tree, self.on_attendance_select):
+            if hasattr(self, "att_detail_employee"):
+                self.att_detail_employee.set("-")
+                self.att_detail_date.set("-")
+                self.att_detail_status.set("-")
+                self.att_detail_reason.set("-")
+                self.att_detail_source.set("-")
+
+    def clear_leave_form(self):
+        self.leave_id_var.set("")
+        self.leave_employee_var.set("")
+        self.leave_start_var.set("")
+        self.leave_end_var.set("")
+        self.leave_type_var.set(LEAVE_TYPES[0])
+        self.leave_status_var.set(LEAVE_STATUSES[0])
+        self.leave_reason_var.set("")
+        self.leave_doc_no_var.set("")
+        self.leave_apply_attendance_var.set(True)
+        self.leave_document_path = ""
+
+    def clear_leave_filter(self):
+        self.leave_filter_employee_var.set("Tum Calisanlar")
+        self.leave_filter_status_var.set("Tum Durumlar")
+        self.leave_filter_start_var.set("")
+        self.leave_filter_end_var.set("")
+        if hasattr(self, "leave_filter_search_var"):
+            self.leave_filter_search_var.set("")
+        clear_date_entry(self.leave_filter_start_entry)
+        clear_date_entry(self.leave_filter_end_entry)
+        self.refresh_leave_records()
+
+    def on_leave_select(self, _event=None):
+        selected = self.leave_tree.selection()
+        if not selected:
+            return
+        values = self.leave_tree.item(selected[0], "values")
+        if not values or not str(values[0]).isdigit():
+            return
+        self.leave_id_var.set(values[0])
+        self.leave_employee_var.set(values[1])
+        self.leave_start_var.set(values[2])
+        self.leave_end_var.set(values[3])
+        self.leave_type_var.set(values[5])
+        self.leave_status_var.set(values[6])
+        self.leave_reason_var.set(values[7])
+        self.leave_doc_no_var.set(values[8])
+        if hasattr(self, "leave_detail_employee"):
+            self.leave_detail_employee.set(values[1])
+            self.leave_detail_dates.set(f"{values[2]} - {values[3]}")
+            self.leave_detail_type.set(values[5])
+            self.leave_detail_status.set(values[6])
+            self.leave_detail_reason.set(values[7] or "-")
+            self.leave_detail_doc.set(values[8] or "-")
+        if hasattr(self, "leave_history_tree"):
+            self._refresh_leave_history(values[0])
+
+    def _persist_leave_record(self):
+        name = self.leave_employee_var.get().strip()
+        if not name:
+            messagebox.showwarning("Uyari", "Calisan secin.")
+            return None
+        base, region = split_display_name(name, REGIONS)
+        if region is None:
+            employee_id = self.employee_map.get((base, "")) or self.employee_map.get((base, self._entry_region()))
+        else:
+            employee_id = self.employee_map.get((base, region))
+        if not employee_id:
+            messagebox.showwarning("Uyari", "Calisan bulunamadi.")
+            return None
+        start_date = self.leave_start_var.get().strip()
+        end_date = self.leave_end_var.get().strip()
+        if not start_date or not end_date:
+            messagebox.showwarning("Uyari", "Baslangic ve bitis tarihi zorunlu.")
+            return None
+        try:
+            start_date = normalize_date(start_date)
+            end_date = normalize_date(end_date)
+        except ValueError as exc:
+            messagebox.showwarning("Uyari", str(exc))
+            return None
+        if end_date < start_date:
+            messagebox.showwarning("Uyari", "Bitis tarihi baslangictan once olamaz.")
+            return None
+        leave_type = self.leave_type_var.get().strip()
+        status = self.leave_status_var.get().strip() or "Onayli"
+        reason = self.leave_reason_var.get().strip()
+        doc_no = self.leave_doc_no_var.get().strip()
+        leave_id = self.leave_id_var.get().strip()
+        prev_status = None
+        if leave_id:
+            existing = db.get_leave_record(parse_int(leave_id))
+            if existing:
+                prev_status = existing[9]
+        if leave_id:
+            db.update_leave_record(
+                parse_int(leave_id),
+                employee_id,
+                start_date,
+                end_date,
+                leave_type,
+                reason,
+                doc_no,
+                status,
+                self._entry_region(),
+            )
+        else:
+            leave_id = db.add_leave_record(
+                employee_id,
+                start_date,
+                end_date,
+                leave_type,
+                reason,
+                doc_no,
+                status,
+                self._entry_region(),
+            )
+        if not prev_status or prev_status != status:
+            try:
+                db.add_leave_status_history(parse_int(leave_id), status, reason, self.current_user)
+            except Exception:
+                pass
+        return leave_id
+
+    def _refresh_leave_history(self, leave_id):
+        if not hasattr(self, "leave_history_tree"):
+            return
+        for item in self.leave_history_tree.get_children():
+            self.leave_history_tree.delete(item)
+        try:
+            history = db.list_leave_status_history(parse_int(leave_id))
+        except Exception:
+            history = []
+        for status, note, user, changed_at in history:
+            tag = "odd" if len(self.leave_history_tree.get_children()) % 2 else "even"
+            self.leave_history_tree.insert(
+                "",
+                tk.END,
+                values=(status, note or "", user or "", changed_at),
+                tags=(tag,),
+            )
+        if not history:
+            insert_empty_row(self.leave_history_tree, ("status", "note", "user", "date"), "Kayit yok")
+
+    def set_leave_status(self, new_status):
+        selected = self.leave_tree.selection()
+        leave_id = self.leave_id_var.get().strip()
+        if selected:
+            values = self.leave_tree.item(selected[0], "values")
+            leave_id = values[0]
+        if not leave_id:
+            messagebox.showwarning("Uyari", "Durum icin izin secin.")
+            return
+        leave = db.get_leave_record(parse_int(leave_id))
+        if not leave:
+            messagebox.showwarning("Uyari", "Kayit bulunamadi.")
+            return
+        (
+            _lid,
+            employee_id,
+            _name,
+            start_date,
+            end_date,
+            leave_type,
+            reason,
+            doc_no,
+            _doc_path,
+            _status,
+            region,
+        ) = leave
+        db.update_leave_record(
+            parse_int(leave_id),
+            employee_id,
+            start_date,
+            end_date,
+            leave_type,
+            reason,
+            doc_no,
+            new_status,
+            region,
+        )
+        try:
+            db.add_leave_status_history(parse_int(leave_id), new_status, reason, self.current_user)
+        except Exception:
+            pass
+        self.refresh_leave_records()
+        self.notify(f"Izin durumu guncellendi: {new_status}")
+
+    def add_or_update_leave(self):
+        leave_id = self._persist_leave_record()
+        if not leave_id:
+            return
+        if self.leave_apply_attendance_var.get():
+            self._apply_leave_to_attendance(leave_id)
+        self._log_action("leave_save", f"id={leave_id}")
+        self.refresh_leave_records()
+        self.clear_leave_form()
+        self.notify("Izin kaydedildi.")
+
+    def delete_leave(self):
+        leave_id = self.leave_id_var.get().strip()
+        if not leave_id:
+            selected = self.leave_tree.selection()
+            if selected:
+                values = self.leave_tree.item(selected[0], "values")
+                leave_id = values[0]
+        if not leave_id:
+            messagebox.showwarning("Uyari", "Silmek icin izin secin.")
+            return
+        if messagebox.askyesno("Onay", "Izin kaydini silmek istiyor musunuz?"):
+            db.delete_leave_record(parse_int(leave_id))
+            self._log_action("leave_delete", f"id={leave_id}")
+            self.refresh_leave_records()
+            self.clear_leave_form()
+
+    def _apply_leave_to_attendance(self, leave_id):
+        leave = db.get_leave_record(parse_int(leave_id))
+        if not leave:
+            return
+        (
+            _id,
+            employee_id,
+            _name,
+            start_date,
+            end_date,
+            leave_type,
+            reason,
+            _doc_no,
+            _doc_path,
+            _status,
+            region,
+        ) = leave
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+        except ValueError:
+            return
+        day = start_dt
+        while day <= end_dt:
+            status = "Izinli"
+            note = leave_type
+            if reason:
+                note = f"{leave_type} - {reason}"
+            db.upsert_attendance_record(employee_id, day.strftime("%Y-%m-%d"), status, note, region, "Izin")
+            day += timedelta(days=1)
+
+    def _calc_leave_days(self, start_date, end_date):
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+        except ValueError:
+            return 0
+        if end_dt < start_dt:
+            return 0
+        return (end_dt - start_dt).days + 1
+
+    def refresh_leave_records(self):
+        if not hasattr(self, "leave_tree"):
+            return
+        for item in self.leave_tree.get_children():
+            self.leave_tree.delete(item)
+        if hasattr(self, "leave_totals_tree"):
+            for item in self.leave_totals_tree.get_children():
+                self.leave_totals_tree.delete(item)
+
+        employee_name = self.leave_filter_employee_var.get().strip()
+        employee_id = None
+        if employee_name and employee_name != "Tum Calisanlar":
+            base, region = split_display_name(employee_name, REGIONS)
+            if region is None:
+                employee_id = self.employee_map.get((base, "")) or self.employee_map.get(
+                    (base, self._entry_region())
+                )
+            else:
+                employee_id = self.employee_map.get((base, region))
+
+        status_filter = self.leave_filter_status_var.get().strip()
+        start_date = self.leave_filter_start_var.get().strip() or None
+        end_date = self.leave_filter_end_var.get().strip() or None
+        search = ""
+        if hasattr(self, "leave_filter_search_var"):
+            search = self.leave_filter_search_var.get().strip().lower()
+        try:
+            if start_date:
+                start_date = normalize_date(start_date)
+            if end_date:
+                end_date = normalize_date(end_date)
+        except ValueError as exc:
+            messagebox.showwarning("Uyari", str(exc))
+            return
+
+        records = db.list_leave_records(
+            employee_id=employee_id,
+            start_date=start_date,
+            end_date=end_date,
+            status=None if status_filter == "Tum Durumlar" else status_filter,
+            region=self._view_region(),
+        )
+
+        totals = {}
+        total_days_approved = 0
+        approved_count = 0
+        active_count = 0
+        today = datetime.now().date()
+        for rec in records:
+            (
+                leave_id,
+                _emp_id,
+                name,
+                start_date,
+                end_date,
+                leave_type,
+                reason,
+                doc_no,
+                _doc_path,
+                status,
+                region,
+            ) = rec
+            if search:
+                hay = " ".join([name, start_date, end_date, reason or "", doc_no or ""]).lower()
+                if search not in hay:
+                    continue
+            days = self._calc_leave_days(start_date, end_date)
+            tag = "odd" if len(self.leave_tree.get_children()) % 2 else "even"
+            self.leave_tree.insert(
+                "",
+                tk.END,
+                values=(
+                    leave_id,
+                    name,
+                    start_date,
+                    end_date,
+                    days,
+                    leave_type,
+                    status,
+                    reason or "",
+                    doc_no or "",
+                    region or "",
+                ),
+                tags=(tag,),
+            )
+            if status == "Onayli":
+                totals[name] = totals.get(name, 0) + days
+                total_days_approved += days
+                approved_count += 1
+                try:
+                    start_dt = datetime.strptime(start_date, "%Y-%m-%d").date()
+                    end_dt = datetime.strptime(end_date, "%Y-%m-%d").date()
+                    if start_dt <= today <= end_dt:
+                        active_count += 1
+                except Exception:
+                    pass
+        if not self.leave_tree.get_children():
+            insert_empty_row(
+                self.leave_tree,
+                ("id", "employee", "start", "end", "days", "type", "status", "reason", "doc_no", "region"),
+                "Kayit yok",
+            )
+
+        for name, days in sorted(totals.items()):
+            self.leave_totals_tree.insert("", tk.END, values=(name, days))
+        if hasattr(self, "leave_stats"):
+            self._animate_stat(self.leave_stats["total_days"], total_days_approved, decimals=0)
+            self._animate_stat(self.leave_stats["approved"], approved_count, decimals=0)
+            self._animate_stat(self.leave_stats["active"], active_count, decimals=0)
+        if not self._auto_select_tree_first(self.leave_tree, self.on_leave_select):
+            if hasattr(self, "leave_detail_employee"):
+                self.leave_detail_employee.set("-")
+                self.leave_detail_dates.set("-")
+                self.leave_detail_type.set("-")
+                self.leave_detail_status.set("-")
+                self.leave_detail_reason.set("-")
+                self.leave_detail_doc.set("-")
+            if hasattr(self, "leave_history_tree"):
+                for item in self.leave_history_tree.get_children():
+                    self.leave_history_tree.delete(item)
+
+    def generate_leave_form(self):
+        leave_id = self._persist_leave_record()
+        if not leave_id:
+            return
+        leave = db.get_leave_record(parse_int(leave_id))
+        if not leave:
+            return
+        (
+            _id,
+            _emp_id,
+            name,
+            start_date,
+            end_date,
+            leave_type,
+            reason,
+            doc_no,
+            _doc_path,
+            _status,
+            _region,
+        ) = leave
+        details = (
+            self.employee_details.get((name, _region or ""))
+            or self.employee_details.get((name, ""))
+            or {}
+        )
+        output_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile=f"izin_formu_{name}_{start_date}.xlsx",
+        )
+        if not output_path:
+            return
+        report.export_leave_form(
+            output_path,
+            name,
+            details.get("identity_no", ""),
+            details.get("department", ""),
+            details.get("title", ""),
+            start_date,
+            end_date,
+            leave_type,
+            reason,
+            self.settings.get("company_name", ""),
+            doc_no,
+            self.settings.get("logo_path", ""),
+        )
+        db.update_leave_document(parse_int(leave_id), output_path, doc_no)
+        self._log_action("leave_form_export", f"id={leave_id} file={os.path.basename(output_path)}")
+        self.refresh_leave_records()
+        messagebox.showinfo("Basarili", f"Izin formu kaydedildi: {output_path}")
+
+    def open_leave_document(self):
+        selected = self.leave_tree.selection()
+        if not selected:
+            messagebox.showwarning("Uyari", "Belge acmak icin izin secin.")
+            return
+        values = self.leave_tree.item(selected[0], "values")
+        leave_id = parse_int(values[0])
+        leave = db.get_leave_record(leave_id)
+        if not leave:
+            messagebox.showwarning("Uyari", "Belge bulunamadi.")
+            return
+        doc_path = leave[8]
+        if not doc_path or not os.path.isfile(doc_path):
+            messagebox.showwarning("Uyari", "Belge dosyasi bulunamadi.")
+            return
+        os.startfile(doc_path)
 
     def import_employees(self):
         path = filedialog.askopenfilename(
@@ -2082,6 +4058,18 @@ class PuantajApp(tk.Tk):
         ttk.Checkbutton(row2, text="Tarih filtresi kullan", variable=self.report_use_dates).pack(
             side=tk.LEFT, padx=6
         )
+        ttk.Button(row2, text="Son 7 Gun", command=lambda: self.apply_report_preset("last7")).pack(
+            side=tk.LEFT, padx=6
+        )
+        ttk.Button(row2, text="Bu Ay", command=lambda: self.apply_report_preset("this_month")).pack(
+            side=tk.LEFT, padx=6
+        )
+        ttk.Button(row2, text="Onceki Ay", command=lambda: self.apply_report_preset("prev_month")).pack(
+            side=tk.LEFT, padx=6
+        )
+        ttk.Button(row2, text="PDF + Excel", style="Accent.TButton", command=self.export_report_bundle).pack(
+            side=tk.LEFT, padx=6
+        )
 
         viewer = ttk.LabelFrame(self.tab_reports_body, text="Rapor Goruntule", style="Section.TLabelframe")
         viewer.pack(fill=tk.X, padx=6, pady=6)
@@ -2091,8 +4079,16 @@ class PuantajApp(tk.Tk):
 
         archive = ttk.LabelFrame(self.tab_reports_body, text="Rapor Arsivi", style="Section.TLabelframe")
         archive.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        pane = ttk.PanedWindow(archive, orient=tk.HORIZONTAL)
+        pane.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        list_frame = ttk.Frame(pane)
+        detail_frame = ttk.LabelFrame(pane, text="Detay", style="Section.TLabelframe")
+        pane.add(list_frame, weight=4)
+        pane.add(detail_frame, weight=2)
+
         self.report_tree = ttk.Treeview(
-            archive,
+            list_frame,
             columns=("id", "file", "created", "employee", "range"),
             show="headings",
             height=8,
@@ -2107,20 +4103,50 @@ class PuantajApp(tk.Tk):
         self.report_tree.column("created", width=140)
         self.report_tree.column("employee", width=180)
         self.report_tree.column("range", width=180)
-        report_xscroll = ttk.Scrollbar(archive, orient=tk.HORIZONTAL, command=self.report_tree.xview)
-        report_yscroll = ttk.Scrollbar(archive, orient=tk.VERTICAL, command=self.report_tree.yview)
+        report_xscroll = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL, command=self.report_tree.xview)
+        report_yscroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.report_tree.yview)
         self.report_tree.configure(xscrollcommand=report_xscroll.set, yscrollcommand=report_yscroll.set)
-        archive.columnconfigure(0, weight=1)
-        archive.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
         self.report_tree.grid(row=0, column=0, sticky="nsew")
+        self.report_tree.bind("<<TreeviewSelect>>", self.on_report_select)
+        self._apply_tree_zebra(self.report_tree)
         report_yscroll.grid(row=0, column=1, sticky="ns")
         report_xscroll.grid(row=1, column=0, sticky="ew")
 
-        archive.rowconfigure(0, weight=1)
-        archive.columnconfigure(0, weight=1)
+        self.report_detail_file = tk.StringVar(value="-")
+        self.report_detail_employee = tk.StringVar(value="-")
+        self.report_detail_date = tk.StringVar(value="-")
+        self.report_detail_range = tk.StringVar(value="-")
+        self.report_detail_path = tk.StringVar(value="-")
+
+        dr1 = ttk.Frame(detail_frame)
+        dr1.pack(fill=tk.X, pady=4)
+        ttk.Label(dr1, text="Dosya").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(dr1, textvariable=self.report_detail_file).pack(side=tk.LEFT)
+
+        dr2 = ttk.Frame(detail_frame)
+        dr2.pack(fill=tk.X, pady=4)
+        ttk.Label(dr2, text="Calisan").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(dr2, textvariable=self.report_detail_employee).pack(side=tk.LEFT)
+
+        dr3 = ttk.Frame(detail_frame)
+        dr3.pack(fill=tk.X, pady=4)
+        ttk.Label(dr3, text="Tarih").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(dr3, textvariable=self.report_detail_date).pack(side=tk.LEFT)
+
+        dr4 = ttk.Frame(detail_frame)
+        dr4.pack(fill=tk.X, pady=4)
+        ttk.Label(dr4, text="Aralik").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(dr4, textvariable=self.report_detail_range).pack(side=tk.LEFT)
+
+        dr5 = ttk.Frame(detail_frame)
+        dr5.pack(fill=tk.X, pady=4)
+        ttk.Label(dr5, text="Yol").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(dr5, textvariable=self.report_detail_path, wraplength=220).pack(side=tk.LEFT)
 
         btn_row = ttk.Frame(archive)
-        btn_row.grid(row=2, column=0, sticky="ew", pady=6)
+        btn_row.pack(fill=tk.X, pady=6)
         ttk.Button(btn_row, text="Arsivi Yenile", command=self.refresh_report_archive).pack(side=tk.LEFT, padx=6)
         ttk.Button(btn_row, text="Seciliyi Goruntule", command=self.preview_selected_report).pack(
             side=tk.LEFT, padx=6
@@ -2132,6 +4158,30 @@ class PuantajApp(tk.Tk):
             foreground="#444444",
         )
         note.pack(anchor=tk.W, padx=6, pady=(0, 6))
+
+    def _collect_report_records(self, employee_id=None, start_date=None, end_date=None):
+        region = self._view_region()
+        timesheet_records = db.list_timesheets(
+            employee_id=employee_id,
+            start_date=start_date,
+            end_date=end_date,
+            region=region,
+        )
+        attendance_records = db.list_attendance_records(
+            employee_id=employee_id,
+            start_date=start_date,
+            end_date=end_date,
+            status=None,
+            region=region,
+        )
+        leave_records = db.list_leave_records(
+            employee_id=employee_id,
+            start_date=start_date,
+            end_date=end_date,
+            status="Onayli",
+            region=region,
+        )
+        return timesheet_records, attendance_records, leave_records
 
     def export_report(self):
         employee_name = self.report_employee_var.get().strip()
@@ -2159,13 +4209,12 @@ class PuantajApp(tk.Tk):
             messagebox.showwarning("Uyari", str(exc))
             return
 
-        records = db.list_timesheets(
+        records, attendance_records, leave_records = self._collect_report_records(
             employee_id=employee_id,
             start_date=start_date,
             end_date=end_date,
-            region=self._view_region(),
         )
-        if not records:
+        if not records and not attendance_records and not leave_records:
             messagebox.showinfo("Bilgi", "Rapor icin veri bulunamadi.")
             return
 
@@ -2173,7 +4222,8 @@ class PuantajApp(tk.Tk):
             employee_slug = employee_name.replace(" ", "_")
         else:
             employee_slug = "tum_calisanlar"
-        filename = f"puantaj_raporu_{employee_slug}_{start_date or 'tum'}_{end_date or 'tum'}.xlsx"
+        company_slug = (self.settings.get("company_name", "") or "rainstaff").strip().replace(" ", "_")
+        filename = f"{company_slug}_rapor_{employee_slug}_{start_date or 'tum'}_{end_date or 'tum'}.xlsx"
         output_path = filedialog.asksaveasfilename(
             defaultextension=".xlsx",
             filetypes=[("Excel", "*.xlsx")],
@@ -2184,7 +4234,16 @@ class PuantajApp(tk.Tk):
 
         date_text = f"Tarih Araligi: {start_date or '-'} - {end_date or '-'}"
         try:
-            report.export_report(output_path, records, db.get_all_settings(), date_text)
+            report.export_report(
+                output_path,
+                records,
+                db.get_all_settings(),
+                date_text,
+                attendance_records=attendance_records,
+                leave_records=leave_records,
+                start_date=start_date,
+                end_date=end_date,
+            )
         except ValueError as exc:
             messagebox.showerror("Hata", str(exc))
             return
@@ -2207,6 +4266,25 @@ class PuantajApp(tk.Tk):
             range_text = f"{start_date or '-'} - {end_date or '-'}"
             values = (rep_id, file_path, created_at, employee or "Tum Calisanlar", range_text)
             self.report_tree.insert("", tk.END, values=values)
+        if not self._auto_select_tree_first(self.report_tree, self.on_report_select):
+            if hasattr(self, "report_detail_file"):
+                self.report_detail_file.set("-")
+                self.report_detail_employee.set("-")
+                self.report_detail_date.set("-")
+                self.report_detail_range.set("-")
+                self.report_detail_path.set("-")
+
+    def on_report_select(self, _event=None):
+        selected = self.report_tree.selection()
+        if not selected:
+            return
+        values = self.report_tree.item(selected[0], "values")
+        if hasattr(self, "report_detail_file"):
+            self.report_detail_file.set(os.path.basename(values[1]) if values[1] else "-")
+            self.report_detail_date.set(values[2] or "-")
+            self.report_detail_range.set(values[4] or "-")
+            self.report_detail_employee.set(values[3] or "-")
+            self.report_detail_path.set(values[1] or "-")
 
     def pick_and_preview_report(self):
         path = filedialog.askopenfilename(filetypes=[("Excel", "*.xlsx")])
@@ -2265,6 +4343,23 @@ class PuantajApp(tk.Tk):
                 row_vals.append("" if val is None else val)
             tree.insert("", tk.END, values=row_vals)
 
+    def apply_admin_month_filter(self):
+        month_text = self.admin_month_filter_var.get().strip()
+        if not month_text:
+            return
+        try:
+            parse_month(month_text)
+            month_dt = datetime.strptime(month_text, "%Y-%m")
+            last_day = calendar.monthrange(month_dt.year, month_dt.month)[1]
+            start_date = f"{month_text}-01"
+            end_date = f"{month_text}-{last_day:02d}"
+        except ValueError as exc:
+            messagebox.showwarning("Uyari", str(exc))
+            return
+        self.admin_start_var.set(start_date)
+        self.admin_end_var.set(end_date)
+        self.refresh_admin_summary()
+
     def refresh_admin_summary(self):
         if not hasattr(self, "admin_tree"):
             return
@@ -2312,9 +4407,21 @@ class PuantajApp(tk.Tk):
         dept_overtime = {}
         alerts = []
         work_days = {}
-        for _ts_id, _emp_id, name, work_date, start_time, end_time, break_minutes, is_special, _notes, _region in records:
+        for (
+            _ts_id,
+            _emp_id,
+            name,
+            record_department,
+            work_date,
+            start_time,
+            end_time,
+            break_minutes,
+            is_special,
+            _notes,
+            _region,
+        ) in records:
             details = self.employee_details.get((name, _region or ""), {})
-            department = details.get("department", "")
+            department = details.get("department", "") or record_department or ""
             title = details.get("title", "")
             if department_filter and department_filter != "Tum Departmanlar" and department != department_filter:
                 continue
@@ -2341,18 +4448,25 @@ class PuantajApp(tk.Tk):
                 break_minutes,
                 self.settings,
                 is_special,
+                department,
             )
             key = (name, _region or "")
             if key not in totals:
                 totals[key] = {
                     "name": name,
                     "region": _region or "",
+                    "department": department or "",
+                    "title": title or "",
                     "worked": 0.0,
                     "overtime": 0.0,
                     "night": 0.0,
                     "overnight": 0.0,
                     "special": 0.0,
                 }
+            if not totals[key].get("department") and department:
+                totals[key]["department"] = department
+            if not totals[key].get("title") and title:
+                totals[key]["title"] = title
             totals[key]["worked"] += worked
             totals[key]["overtime"] += overtime
             totals[key]["night"] += night_hours
@@ -2394,6 +4508,7 @@ class PuantajApp(tk.Tk):
         max_daily = max(daily_overtime.values()) if daily_overtime else 0.0
         self.admin_stats["max_daily"].set(f"{max_daily:.2f}")
 
+        self.admin_detail_map = {}
         for _key, data in sorted(totals.items(), key=lambda x: x[1]["name"]):
             display_name = data["name"]
             if data.get("region"):
@@ -2410,6 +4525,18 @@ class PuantajApp(tk.Tk):
                     round(data["special"], 2),
                 ),
             )
+            days = len(work_days.get(data["name"], []))
+            avg_day = (data["worked"] / days) if days else 0.0
+            self.admin_detail_map[display_name] = {
+                "department": data.get("department") or "-",
+                "title": data.get("title") or "-",
+                "worked": round(data["worked"], 2),
+                "overtime": round(data["overtime"], 2),
+                "night": round(data["night"], 2),
+                "overnight": round(data["overnight"], 2),
+                "special": round(data["special"], 2),
+                "avg_day": round(avg_day, 2),
+            }
 
         if hasattr(self, "admin_alert_tree"):
             for work_date, name, issue, value in alerts[:200]:
@@ -2419,6 +4546,18 @@ class PuantajApp(tk.Tk):
             anomalies = self._build_consecutive_day_anomalies(work_days)
             for name, period, issue in anomalies:
                 self.admin_anomaly_tree.insert("", tk.END, values=(name, period, issue))
+        if hasattr(self, "admin_tree"):
+            if not self._auto_select_tree_first(self.admin_tree, self.on_admin_select):
+                if hasattr(self, "admin_detail_name"):
+                    self.admin_detail_name.set("-")
+                    self.admin_detail_department.set("-")
+                    self.admin_detail_title.set("-")
+                    self.admin_detail_worked.set("-")
+                    self.admin_detail_overtime.set("-")
+                    self.admin_detail_night.set("-")
+                    self.admin_detail_overnight.set("-")
+                    self.admin_detail_special.set("-")
+                    self.admin_detail_avg.set("-")
 
     def _build_consecutive_day_anomalies(self, work_days):
         anomalies = []
@@ -2889,6 +5028,8 @@ class PuantajApp(tk.Tk):
 
     def refresh_vehicle_dashboard(self):
         if not hasattr(self, "vehicle_status_tree"):
+            return
+        if not hasattr(self, "dashboard_stats"):
             return
         for item in self.vehicle_status_tree.get_children():
             self.vehicle_status_tree.delete(item)
@@ -3656,6 +5797,206 @@ class PuantajApp(tk.Tk):
             self.admin_tree.selection_set(row_id)
             self.admin_menu.tk_popup(event.x_root, event.y_root)
 
+    def on_admin_select(self, _event=None):
+        selected = self.admin_tree.selection()
+        if not selected:
+            return
+        values = self.admin_tree.item(selected[0], "values")
+        name = values[0]
+        detail = (self.admin_detail_map or {}).get(name, {})
+        if hasattr(self, "admin_detail_name"):
+            self.admin_detail_name.set(name)
+            self.admin_detail_department.set(detail.get("department", "-"))
+            self.admin_detail_title.set(detail.get("title", "-"))
+            self.admin_detail_worked.set(detail.get("worked", "-"))
+            self.admin_detail_overtime.set(detail.get("overtime", "-"))
+            self.admin_detail_night.set(detail.get("night", "-"))
+            self.admin_detail_overnight.set(detail.get("overnight", "-"))
+            self.admin_detail_special.set(detail.get("special", "-"))
+            self.admin_detail_avg.set(detail.get("avg_day", "-"))
+
+    def on_admin_alert_select(self, _event=None):
+        selected = self.admin_alert_tree.selection()
+        if not selected:
+            return
+        values = self.admin_alert_tree.item(selected[0], "values")
+        if hasattr(self, "admin_alert_detail"):
+            self.admin_alert_detail.set(f"{values[0]} | {values[1]} | {values[2]}: {values[3]}")
+
+    def on_admin_anomaly_select(self, _event=None):
+        selected = self.admin_anomaly_tree.selection()
+        if not selected:
+            return
+        values = self.admin_anomaly_tree.item(selected[0], "values")
+        if hasattr(self, "admin_anomaly_detail"):
+            self.admin_anomaly_detail.set(f"{values[0]} | {values[1]} | {values[2]}")
+
+    def copy_selected_admin_rows(self):
+        selected = self.admin_tree.selection()
+        if not selected:
+            messagebox.showinfo("Bilgi", "Kopyalamak icin satir secin.")
+            return
+        lines = []
+        for item in selected:
+            values = self.admin_tree.item(item, "values")
+            lines.append("\t".join(str(v) for v in values))
+        data = "\n".join(lines)
+        self.clipboard_clear()
+        self.clipboard_append(data)
+        self.notify("Secili satirlar panoya kopyalandi.")
+
+    def export_selected_admin_report(self):
+        selected = self.admin_tree.selection()
+        if not selected:
+            messagebox.showinfo("Bilgi", "Rapor icin calisan secin.")
+            return
+        names = [self.admin_tree.item(item, "values")[0] for item in selected]
+        clean_names = [split_display_name(n, REGIONS)[0] for n in names]
+        start_date = self.admin_start_var.get().strip() or None
+        end_date = self.admin_end_var.get().strip() or None
+        try:
+            if start_date:
+                start_date = normalize_date(start_date)
+            if end_date:
+                end_date = normalize_date(end_date)
+        except ValueError as exc:
+            messagebox.showwarning("Uyari", str(exc))
+            return
+        records, attendance_records, leave_records = self._collect_report_records(
+            start_date=start_date,
+            end_date=end_date,
+        )
+        name_set = set(clean_names)
+        filtered = [r for r in records if r[2] in name_set]
+        filtered_attendance = [r for r in attendance_records if len(r) > 2 and r[2] in name_set]
+        filtered_leave = [r for r in leave_records if len(r) > 2 and r[2] in name_set]
+        if not filtered and not filtered_attendance and not filtered_leave:
+            messagebox.showinfo("Bilgi", "Secili calisanlar icin veri bulunamadi.")
+            return
+        filename = f"admin_secili_rapor_{datetime.now().strftime('%Y%m%d_%H%M')}.xlsx"
+        output_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile=filename,
+        )
+        if not output_path:
+            return
+        date_text = f"Tarih Araligi: {start_date or '-'} - {end_date or '-'}"
+        report.export_report(
+            output_path,
+            filtered,
+            db.get_all_settings(),
+            date_text,
+            attendance_records=filtered_attendance,
+            leave_records=filtered_leave,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        messagebox.showinfo("Basarili", f"Rapor kaydedildi: {output_path}")
+
+    def export_report_bundle(self):
+        employee_name = self.report_employee_var.get().strip()
+        employee_id = None
+        if employee_name and employee_name != "Tum Calisanlar":
+            base, region = split_display_name(employee_name, REGIONS)
+            if region is None:
+                employee_id = self.employee_map.get((base, "")) or self.employee_map.get(
+                    (base, self._entry_region())
+                )
+            else:
+                employee_id = self.employee_map.get((base, region))
+        start_date = self.report_start_var.get().strip() or None
+        end_date = self.report_end_var.get().strip() or None
+        try:
+            if self.report_use_dates.get():
+                if start_date:
+                    start_date = normalize_date(start_date)
+                if end_date:
+                    end_date = normalize_date(end_date)
+            else:
+                start_date = None
+                end_date = None
+        except ValueError as exc:
+            messagebox.showwarning("Uyari", str(exc))
+            return
+
+        records, attendance_records, leave_records = self._collect_report_records(
+            employee_id=employee_id,
+            start_date=start_date,
+            end_date=end_date,
+        )
+        if not records and not attendance_records and not leave_records:
+            messagebox.showinfo("Bilgi", "Rapor icin veri bulunamadi.")
+            return
+
+        if employee_name and employee_name != "Tum Calisanlar":
+            employee_slug = employee_name.replace(" ", "_")
+        else:
+            employee_slug = "tum_calisanlar"
+        company_slug = (self.settings.get("company_name", "") or "rainstaff").strip().replace(" ", "_")
+        base_name = f"{company_slug}_rapor_{employee_slug}_{start_date or 'tum'}_{end_date or 'tum'}"
+        output_path = filedialog.asksaveasfilename(
+            defaultextension=".xlsx",
+            filetypes=[("Excel", "*.xlsx")],
+            initialfile=f"{base_name}.xlsx",
+        )
+        if not output_path:
+            return
+        date_text = f"Tarih Araligi: {start_date or '-'} - {end_date or '-'}"
+        try:
+            report.export_report(
+                output_path,
+                records,
+                db.get_all_settings(),
+                date_text,
+                attendance_records=attendance_records,
+                leave_records=leave_records,
+                start_date=start_date,
+                end_date=end_date,
+            )
+        except ValueError as exc:
+            messagebox.showerror("Hata", str(exc))
+            return
+
+        pdf_path = os.path.splitext(output_path)[0] + ".pdf"
+        pdf_ok = True
+        try:
+            report.export_report_pdf(pdf_path, records, db.get_all_settings(), date_text)
+        except Exception as exc:
+            pdf_ok = False
+            messagebox.showwarning("Uyari", f"PDF olusturulamadi: {exc}")
+
+        created_at = datetime.now().strftime("%Y-%m-%d %H:%M")
+        db.add_report_log(output_path, created_at, employee_name, start_date, end_date)
+        self.refresh_report_archive()
+        if pdf_ok:
+            messagebox.showinfo("Basarili", f"Excel + PDF kaydedildi:\n{output_path}\n{pdf_path}")
+        else:
+            messagebox.showinfo("Basarili", f"Excel kaydedildi: {output_path}")
+
+    def apply_report_preset(self, preset):
+        today = datetime.now().date()
+        if preset == "last7":
+            start = today - timedelta(days=6)
+            end = today
+        elif preset == "this_month":
+            start = today.replace(day=1)
+            end = today
+        elif preset == "prev_month":
+            first_day = today.replace(day=1)
+            end = first_day - timedelta(days=1)
+            start = end.replace(day=1)
+        else:
+            return
+        self.report_use_dates.set(True)
+        self.report_start_var.set(start.strftime("%Y-%m-%d"))
+        self.report_end_var.set(end.strftime("%Y-%m-%d"))
+        if hasattr(self, "report_start_entry"):
+            self.report_start_entry.configure(state="normal")
+        if hasattr(self, "report_end_entry"):
+            self.report_end_entry.configure(state="normal")
+        self.refresh_report_archive()
+
     def show_admin_employee_detail(self):
         selected = self.admin_tree.selection()
         if not selected:
@@ -3726,7 +6067,19 @@ class PuantajApp(tk.Tk):
         yscroll.pack(side=tk.RIGHT, fill=tk.Y)
         xscroll.pack(side=tk.BOTTOM, fill=tk.X)
 
-        for _ts_id, _emp_id, _name, work_date, start_time, end_time, break_minutes, is_special, notes, _region in records:
+        for (
+            _ts_id,
+            _emp_id,
+            _name,
+            department,
+            work_date,
+            start_time,
+            end_time,
+            break_minutes,
+            is_special,
+            notes,
+            _region,
+        ) in records:
             (
                 worked,
                 _scheduled,
@@ -3743,6 +6096,7 @@ class PuantajApp(tk.Tk):
                 break_minutes,
                 self.settings,
                 is_special,
+                department,
             )
             special_total = round(spec_norm + spec_ot + spec_night, 2)
             tree.insert(
@@ -3766,15 +6120,25 @@ class PuantajApp(tk.Tk):
         frame = ttk.LabelFrame(self.tab_settings_body, text="Genel Ayarlar", style="Section.TLabelframe")
         frame.pack(fill=tk.X, padx=6, pady=6)
 
+        kpi_row = ttk.Frame(self.tab_settings_body)
+        kpi_row.pack(fill=tk.X, padx=6, pady=6)
+        self.settings_stats = {
+            "users": tk.StringVar(value="0"),
+            "regions": tk.StringVar(value=str(len(REGIONS)))
+        }
+        create_kpi_card(kpi_row, "Kullanici", self.settings_stats["users"], theme=self._ui_theme).pack(side=tk.LEFT, padx=6)
+        create_kpi_card(kpi_row, "Bolge", self.settings_stats["regions"], theme=self._ui_theme).pack(side=tk.LEFT, padx=6)
+        try:
+            self._animate_stat(self.settings_stats["users"], len(db.list_users()), decimals=0)
+        except Exception:
+            pass
+
         self.company_name_var = tk.StringVar(value=self.settings.get("company_name", ""))
         self.report_title_var = tk.StringVar(value=self.settings.get("report_title", "Puantaj ve Mesai Raporu"))
-        self.weekday_hours_var = tk.StringVar(value=self.settings.get("weekday_hours", "9"))
+        self.weekday_hours_var = tk.StringVar(value=self.settings.get("weekday_hours", "8"))
         self.sat_start_var = tk.StringVar(value=self.settings.get("saturday_start", "09:00"))
         self.sat_end_var = tk.StringVar(value=self.settings.get("saturday_end", "14:00"))
         self.logo_path_var = tk.StringVar(value=self.settings.get("logo_path", ""))
-        self.sync_enabled_var = tk.BooleanVar(value=self.settings.get("sync_enabled", "0") == "1")
-        self.sync_url_var = tk.StringVar(value=self.settings.get("sync_url", ""))
-        self.sync_token_var = tk.StringVar(value=self.settings.get("sync_token", ""))
         self.admin_entry_region_var.set(self.settings.get("admin_entry_region", "Ankara"))
         view_region = self.settings.get("admin_view_region", "Tum Bolgeler")
         if view_region == "ALL":
@@ -3823,22 +6187,6 @@ class PuantajApp(tk.Tk):
         ttk.Button(btn_row, text="Kaydet", style="Accent.TButton", command=self.save_settings).pack(
             side=tk.LEFT, padx=6
         )
-
-        sync_frame = ttk.LabelFrame(self.tab_settings_body, text="Bulut Senkron", style="Section.TLabelframe")
-        sync_frame.pack(fill=tk.X, padx=6, pady=6)
-        srow1 = ttk.Frame(sync_frame)
-        srow1.pack(fill=tk.X, pady=4)
-        ttk.Checkbutton(srow1, text="Senkronu Ac", variable=self.sync_enabled_var).pack(side=tk.LEFT, padx=6)
-        create_labeled_entry(srow1, "Sunucu URL", self.sync_url_var, 40).pack(side=tk.LEFT, padx=6)
-        srow2 = ttk.Frame(sync_frame)
-        srow2.pack(fill=tk.X, pady=4)
-        create_labeled_entry(srow2, "API Token", self.sync_token_var, 40).pack(side=tk.LEFT, padx=6)
-        ttk.Button(srow2, text="Senkronu Dene", command=self.manual_sync).pack(side=tk.LEFT, padx=6)
-        ttk.Label(
-            sync_frame,
-            text="Kayit sonrasi otomatik yukleme yapilir. URL ornek: https://seninapp.onrender.com",
-            foreground="#5f6a72",
-        ).pack(anchor="w", padx=8, pady=(2, 6))
 
         data_frame = ttk.LabelFrame(self.tab_settings_body, text="Veri Yonetimi", style="Section.TLabelframe")
         data_frame.pack(fill=tk.X, padx=6, pady=6)
@@ -3916,6 +6264,7 @@ class PuantajApp(tk.Tk):
         tpl_yscroll.grid(row=0, column=1, sticky="ns")
         tpl_xscroll.grid(row=1, column=0, sticky="ew")
         self.template_tree.bind("<<TreeviewSelect>>", self.on_template_select)
+        self._apply_tree_zebra(self.template_tree)
 
     # Kullanım rehberi kaldırıldı - Modern ERP tasarımına geçildi
 
@@ -3931,17 +6280,19 @@ class PuantajApp(tk.Tk):
         ttk.Button(tools, text="Log Dosyasi", command=self.open_log_file).pack(side=tk.LEFT, padx=6)
         ttk.Label(tools, text=LOG_PATH, foreground="#5f6a72").pack(side=tk.LEFT, padx=8)
 
-        text_frame = ttk.Frame(frame)
+        text_frame = tk.Frame(frame, bg="#0b1118")
         text_frame.pack(fill=tk.BOTH, expand=True)
         self.log_text = tk.Text(
             text_frame,
-            height=18,
+            height=26,
             wrap="none",
-            bg="#0f172a",
-            fg="#e2e8f0",
-            insertbackground="#e2e8f0",
-            font=("Consolas", 9),
+            bg="#0b1118",
+            fg="#9FE870",
+            insertbackground="#9FE870",
+            font=("Consolas", 10),
         )
+        self.log_text.tag_configure("banner", foreground="#7FD6FF")
+        self.log_text.tag_configure("credit", foreground="#FFD46A")
         yscroll = ttk.Scrollbar(text_frame, orient=tk.VERTICAL, command=self.log_text.yview)
         xscroll = ttk.Scrollbar(text_frame, orient=tk.HORIZONTAL, command=self.log_text.xview)
         self.log_text.configure(yscrollcommand=yscroll.set, xscrollcommand=xscroll.set)
@@ -3950,8 +6301,18 @@ class PuantajApp(tk.Tk):
         self.log_text.grid(row=0, column=0, sticky="nsew")
         yscroll.grid(row=0, column=1, sticky="ns")
         xscroll.grid(row=1, column=0, sticky="ew")
+        banner = (
+            "     .  .  .     .  .  .     .  .  .     .  .  .\n"
+            "   .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .\n"
+            " .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .  .\n"
+            "     .  .  .     .  .  .     .  .  .     .  .  .\n"
+        )
+        self.log_text.insert(tk.END, banner, "banner")
+        self.log_text.insert(tk.END, "\nmade by @hsyncnorman\n\n", "credit")
         self.log_text.insert(tk.END, "Log ekranina hosgeldiniz.\n")
         self.log_text.configure(state=tk.DISABLED)
+        footer = tk.Frame(frame, bg="#0b1118", height=10)
+        footer.pack(fill=tk.X)
         self.after(300, self._drain_log_queue)
 
     def _build_vehicles_tab(self):
@@ -4225,136 +6586,299 @@ class PuantajApp(tk.Tk):
         vc_xscroll.grid(row=1, column=0, sticky="ew")
 
     def _build_dashboard_tab(self):
-        summary = ttk.LabelFrame(self.tab_dashboard_body, text="Genel Ozet", style="Section.TLabelframe")
-        summary.pack(fill=tk.X, padx=6, pady=6)
+        content = self.tab_dashboard_body
 
-        self.dashboard_stats = {
-            "vehicles": tk.StringVar(value="0"),
-            "drivers": tk.StringVar(value="0"),
-            "oil_due": tk.StringVar(value="0"),
-            "inspection_due": tk.StringVar(value="0"),
-            "insurance_due": tk.StringVar(value="0"),
-            "maintenance_due": tk.StringVar(value="0"),
-            "license_due": tk.StringVar(value="0"),
+        kpi_frame = ttk.Frame(content)
+        kpi_frame.pack(fill=tk.X, padx=6, pady=6)
+
+        self.dash_stats = {
+            "employees": tk.StringVar(value="0"),
+            "timesheets": tk.StringVar(value="0"),
+            "worked": tk.StringVar(value="0"),
+            "overtime": tk.StringVar(value="0"),
+            "scheduled": tk.StringVar(value="0"),
+            "completion": tk.StringVar(value="0"),
         }
+        create_kpi_card(kpi_frame, "Toplam Calisan", self.dash_stats["employees"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+        create_kpi_card(kpi_frame, "Aralik Puantaj", self.dash_stats["timesheets"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+        create_kpi_card(kpi_frame, "Aralik Calisilan", self.dash_stats["worked"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+        create_kpi_card(kpi_frame, "Aralik Fazla Mesai", self.dash_stats["overtime"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+        create_kpi_card(kpi_frame, "Planlanan", self.dash_stats["scheduled"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
+        create_kpi_card(kpi_frame, "Gerceklesen %", self.dash_stats["completion"], theme=self._ui_theme).pack(
+            side=tk.LEFT, padx=6
+        )
 
-        row1 = ttk.Frame(summary)
-        row1.pack(fill=tk.X, pady=4)
-        ttk.Label(row1, text="Arac").pack(side=tk.LEFT, padx=6)
-        ttk.Label(row1, textvariable=self.dashboard_stats["vehicles"]).pack(side=tk.LEFT, padx=6)
-        ttk.Label(row1, text="Surucu").pack(side=tk.LEFT, padx=18)
-        ttk.Label(row1, textvariable=self.dashboard_stats["drivers"]).pack(side=tk.LEFT, padx=6)
-        ttk.Label(row1, text="Yag Degisimi").pack(side=tk.LEFT, padx=18)
-        ttk.Label(row1, textvariable=self.dashboard_stats["oil_due"]).pack(side=tk.LEFT, padx=6)
-        ttk.Label(row1, text="Muayene").pack(side=tk.LEFT, padx=18)
-        ttk.Label(row1, textvariable=self.dashboard_stats["inspection_due"]).pack(side=tk.LEFT, padx=6)
+        dash_filter = ttk.LabelFrame(content, text="Trend Filtre", style="Section.TLabelframe")
+        dash_filter.pack(fill=tk.X, padx=6, pady=6)
+        self.dash_range_var = tk.StringVar(value="Son 7 Gun")
+        self.dash_start_var = tk.StringVar()
+        self.dash_end_var = tk.StringVar()
+        ttk.Label(dash_filter, text="Aralik").pack(side=tk.LEFT, padx=(0, 6))
+        dash_range_combo = ttk.Combobox(
+            dash_filter,
+            textvariable=self.dash_range_var,
+            values=["Son 7 Gun", "Son 30 Gun", "Bu Ay", "Ozel"],
+            state="readonly",
+            width=12,
+        )
+        dash_range_combo.pack(side=tk.LEFT)
+        dash_range_combo.bind("<<ComboboxSelected>>", lambda _e: self._toggle_dash_range())
+        dstart_frame, self.dash_start_entry = create_labeled_date(dash_filter, "Baslangic", self.dash_start_var, 12)
+        dstart_frame.pack(side=tk.LEFT, padx=6)
+        dend_frame, self.dash_end_entry = create_labeled_date(dash_filter, "Bitis", self.dash_end_var, 12)
+        dend_frame.pack(side=tk.LEFT, padx=6)
+        ttk.Button(dash_filter, text="Uygula", style="Accent.TButton", command=self.refresh_dashboard).pack(
+            side=tk.LEFT, padx=6
+        )
+        clear_date_entry(self.dash_start_entry)
+        clear_date_entry(self.dash_end_entry)
+        self._toggle_dash_range()
 
-        row2 = ttk.Frame(summary)
-        row2.pack(fill=tk.X, pady=4)
-        ttk.Label(row2, text="Sigorta").pack(side=tk.LEFT, padx=6)
-        ttk.Label(row2, textvariable=self.dashboard_stats["insurance_due"]).pack(side=tk.LEFT, padx=6)
-        ttk.Label(row2, text="Bakim").pack(side=tk.LEFT, padx=18)
-        ttk.Label(row2, textvariable=self.dashboard_stats["maintenance_due"]).pack(side=tk.LEFT, padx=6)
-        ttk.Label(row2, text="Ehliyet").pack(side=tk.LEFT, padx=18)
-        ttk.Label(row2, textvariable=self.dashboard_stats["license_due"]).pack(side=tk.LEFT, padx=6)
+        chart_frame = ttk.LabelFrame(content, text="Haftalik Trend (Calisilan Saat)", style="Section.TLabelframe")
+        chart_frame.pack(fill=tk.X, padx=6, pady=6)
+        self.dash_chart = tk.Canvas(chart_frame, height=120, bg=self._ui_theme["bg_content"], highlightthickness=0)
+        self.dash_chart.pack(fill=tk.X, padx=8, pady=8)
 
-        vehicle_status = ttk.LabelFrame(self.tab_dashboard_body, text="Arac Durumu", style="Section.TLabelframe")
-        vehicle_status.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-        self.vehicle_status_tree = ttk.Treeview(
-            vehicle_status,
-            columns=(
-                "plate",
-                "km",
-                "oil",
-                "inspection",
-                "insurance",
-                "maintenance",
-                "last_check",
-                "driver",
-                "region",
-            ),
-            show="headings",
+        self.dash_chart_hint = ttk.Label(
+            chart_frame, text="Son 7 gunde toplam calisilan saat", foreground="#5f6a72"
+        )
+        self.dash_chart_hint.pack(anchor="w", padx=8, pady=(0, 4))
+        summary_wrap = tk.Frame(chart_frame, bg=self._ui_theme["bg_hover"])
+        summary_wrap.pack(fill=tk.X, padx=8, pady=(0, 6))
+        self.dash_chart_summary = tk.Label(
+            summary_wrap,
+            text="-",
+            bg=self._ui_theme["bg_hover"],
+            fg=self._ui_theme["text_primary"],
+            font=("Segoe UI", 9, "bold"),
+            padx=8,
+            pady=4,
+        )
+        self.dash_chart_summary.pack(side=tk.LEFT)
+
+        self.dash_progress = tk.Canvas(chart_frame, height=10, bg=self._ui_theme["bg_hover"], highlightthickness=0)
+        self.dash_progress.pack(fill=tk.X, padx=8, pady=(0, 8))
+
+        activity_frame = ttk.LabelFrame(content, text="Son Aktiviteler", style="Section.TLabelframe")
+        activity_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        term_frame = tk.Frame(activity_frame, bg="#0b1118")
+        term_frame.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+        self.dash_activity = tk.Text(
+            term_frame,
             height=10,
+            wrap="word",
+            bg="#0b1118",
+            fg="#9FE870",
+            insertbackground="#9FE870",
+            font=("Consolas", 9),
         )
-        self.vehicle_status_tree.heading("plate", text="Plaka")
-        self.vehicle_status_tree.heading("km", text="KM")
-        self.vehicle_status_tree.heading("oil", text="Yag")
-        self.vehicle_status_tree.heading("inspection", text="Muayene")
-        self.vehicle_status_tree.heading("insurance", text="Sigorta")
-        self.vehicle_status_tree.heading("maintenance", text="Bakim")
-        self.vehicle_status_tree.heading("last_check", text="Son Kontrol")
-        self.vehicle_status_tree.heading("driver", text="Surucu")
-        self.vehicle_status_tree.heading("region", text="Bolge")
-        self.vehicle_status_tree.column("plate", width=120)
-        self.vehicle_status_tree.column("km", width=80)
-        self.vehicle_status_tree.column("oil", width=110)
-        self.vehicle_status_tree.column("inspection", width=110)
-        self.vehicle_status_tree.column("insurance", width=110)
-        self.vehicle_status_tree.column("maintenance", width=110)
-        self.vehicle_status_tree.column("last_check", width=110)
-        self.vehicle_status_tree.column("driver", width=160)
-        self.vehicle_status_tree.column("region", width=100)
-        self.vehicle_status_tree.tag_configure("oil_due", background="#fde68a")
-        self.vehicle_status_tree.tag_configure("oil_soon", background="#fff7ed")
-        vs_xscroll = ttk.Scrollbar(vehicle_status, orient=tk.HORIZONTAL, command=self.vehicle_status_tree.xview)
-        vs_yscroll = ttk.Scrollbar(vehicle_status, orient=tk.VERTICAL, command=self.vehicle_status_tree.yview)
-        self.vehicle_status_tree.configure(xscrollcommand=vs_xscroll.set, yscrollcommand=vs_yscroll.set)
-        vehicle_status.columnconfigure(0, weight=1)
-        vehicle_status.rowconfigure(0, weight=1)
-        self.vehicle_status_tree.grid(row=0, column=0, sticky="nsew")
-        vs_yscroll.grid(row=0, column=1, sticky="ns")
-        vs_xscroll.grid(row=1, column=0, sticky="ew")
-        self.vehicle_status_menu = tk.Menu(self, tearoff=0)
-        self.vehicle_status_menu.add_command(label="Detay", command=self.show_vehicle_detail)
-        self.vehicle_status_tree.bind("<Button-3>", self.on_vehicle_status_right_click)
-        self.vehicle_status_tree.bind("<Double-1>", lambda _e: self.show_vehicle_detail())
+        yscroll = ttk.Scrollbar(term_frame, orient=tk.VERTICAL, command=self.dash_activity.yview)
+        self.dash_activity.configure(yscrollcommand=yscroll.set)
+        term_frame.columnconfigure(0, weight=1)
+        term_frame.rowconfigure(0, weight=1)
+        self.dash_activity.grid(row=0, column=0, sticky="nsew")
+        yscroll.grid(row=0, column=1, sticky="ns")
+        self.dash_activity.configure(state=tk.DISABLED)
 
-        vehicle_alerts = ttk.LabelFrame(self.tab_dashboard_body, text="Arac Uyarilari", style="Section.TLabelframe")
-        vehicle_alerts.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-        self.vehicle_alert_tree = ttk.Treeview(
-            vehicle_alerts,
-            columns=("plate", "issue", "detail"),
-            show="headings",
-            height=6,
-        )
-        self.vehicle_alert_tree.heading("plate", text="Plaka")
-        self.vehicle_alert_tree.heading("issue", text="Uyari")
-        self.vehicle_alert_tree.heading("detail", text="Detay")
-        self.vehicle_alert_tree.column("plate", width=120)
-        self.vehicle_alert_tree.column("issue", width=200)
-        self.vehicle_alert_tree.column("detail", width=240)
-        self.vehicle_alert_tree.bind("<Double-1>", lambda _e: self._open_vehicle_card_from_alert())
-        va_xscroll = ttk.Scrollbar(vehicle_alerts, orient=tk.HORIZONTAL, command=self.vehicle_alert_tree.xview)
-        va_yscroll = ttk.Scrollbar(vehicle_alerts, orient=tk.VERTICAL, command=self.vehicle_alert_tree.yview)
-        self.vehicle_alert_tree.configure(xscrollcommand=va_xscroll.set, yscrollcommand=va_yscroll.set)
-        vehicle_alerts.columnconfigure(0, weight=1)
-        vehicle_alerts.rowconfigure(0, weight=1)
-        self.vehicle_alert_tree.grid(row=0, column=0, sticky="nsew")
-        va_yscroll.grid(row=0, column=1, sticky="ns")
-        va_xscroll.grid(row=1, column=0, sticky="ew")
+    def _toggle_dash_range(self):
+        if not hasattr(self, "dash_range_var"):
+            return
+        state = "normal" if self.dash_range_var.get() == "Ozel" else "disabled"
+        if hasattr(self, "dash_start_entry"):
+            self.dash_start_entry.configure(state=state)
+        if hasattr(self, "dash_end_entry"):
+            self.dash_end_entry.configure(state=state)
 
-        driver_alerts = ttk.LabelFrame(self.tab_dashboard_body, text="Surucu Uyarilari", style="Section.TLabelframe")
-        driver_alerts.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
-        self.driver_alert_tree = ttk.Treeview(
-            driver_alerts,
-            columns=("driver", "issue", "detail"),
-            show="headings",
-            height=6,
-        )
-        self.driver_alert_tree.heading("driver", text="Surucu")
-        self.driver_alert_tree.heading("issue", text="Uyari")
-        self.driver_alert_tree.heading("detail", text="Detay")
-        self.driver_alert_tree.column("driver", width=200)
-        self.driver_alert_tree.column("issue", width=200)
-        self.driver_alert_tree.column("detail", width=240)
-        da_xscroll = ttk.Scrollbar(driver_alerts, orient=tk.HORIZONTAL, command=self.driver_alert_tree.xview)
-        da_yscroll = ttk.Scrollbar(driver_alerts, orient=tk.VERTICAL, command=self.driver_alert_tree.yview)
-        self.driver_alert_tree.configure(xscrollcommand=da_xscroll.set, yscrollcommand=da_yscroll.set)
-        driver_alerts.columnconfigure(0, weight=1)
-        driver_alerts.rowconfigure(0, weight=1)
-        self.driver_alert_tree.grid(row=0, column=0, sticky="nsew")
-        da_yscroll.grid(row=0, column=1, sticky="ns")
-        da_xscroll.grid(row=1, column=0, sticky="ew")
+    def _render_progress(self, ratio):
+        if not hasattr(self, "dash_progress"):
+            return
+        canvas = self.dash_progress
+        canvas.delete("all")
+        width = canvas.winfo_width() or 600
+        height = canvas.winfo_height() or 10
+        ratio = max(0.0, min(1.0, ratio))
+        fill_w = int(width * ratio)
+        canvas.create_rectangle(0, 0, width, height, fill=self._ui_theme["bg_hover"], width=0)
+        canvas.create_rectangle(0, 0, fill_w, height, fill=self._ui_theme["primary"], width=0)
+
+    def _render_weekly_chart(self, values, labels=None):
+        if not hasattr(self, "dash_chart"):
+            return
+        canvas = self.dash_chart
+        canvas.delete("all")
+        if not values:
+            return
+        width = canvas.winfo_width() or 600
+        height = canvas.winfo_height() or 120
+        max_val = max(values) if max(values) > 0 else 1
+        bar_width = max(20, int(width / max(len(values), 1)) - 8)
+        spacing = 8
+        x = spacing
+        for i, v in enumerate(values):
+            bar_h = int((v / max_val) * (height - 20))
+            y0 = height - 10 - bar_h
+            canvas.create_rectangle(x, y0, x + bar_width, height - 10, fill=self._ui_theme["primary"], width=0)
+            canvas.create_text(
+                x + bar_width / 2,
+                max(8, y0 - 8),
+                text=f"{v:.1f}",
+                fill=self._ui_theme["text_secondary"],
+                font=("Segoe UI", 8),
+            )
+            if labels and i < len(labels):
+                canvas.create_text(
+                    x + bar_width / 2,
+                    height - 2,
+                    text=labels[i],
+                    fill=self._ui_theme["text_secondary"],
+                    font=("Segoe UI", 7),
+                    anchor="s",
+                )
+            x += bar_width + spacing
+
+    def refresh_dashboard(self):
+        if not hasattr(self, "dash_stats"):
+            return
+        today = datetime.now().date()
+        range_type = self.dash_range_var.get() if hasattr(self, "dash_range_var") else "Son 7 Gun"
+        if range_type == "Bu Ay":
+            start_dt = today.replace(day=1)
+            end_dt = today
+        elif range_type == "Son 30 Gun":
+            start_dt = today - timedelta(days=29)
+            end_dt = today
+        elif range_type == "Ozel":
+            try:
+                start_dt = datetime.strptime(self.dash_start_var.get().strip(), "%Y-%m-%d").date()
+                end_dt = datetime.strptime(self.dash_end_var.get().strip(), "%Y-%m-%d").date()
+            except Exception:
+                start_dt = today - timedelta(days=6)
+                end_dt = today
+        else:
+            start_dt = today - timedelta(days=6)
+            end_dt = today
+        if end_dt < start_dt:
+            start_dt, end_dt = end_dt, start_dt
+
+        start_str = start_dt.strftime("%Y-%m-%d")
+        end_str = end_dt.strftime("%Y-%m-%d")
+
+        employees = db.list_employees(region=self._view_region())
+        records = db.list_timesheets(start_date=start_str, end_date=end_str, region=self._view_region())
+
+        total_worked = 0.0
+        total_overtime = 0.0
+        total_scheduled = 0.0
+        for (
+            _ts_id,
+            _emp_id,
+            _name,
+            department,
+            work_date,
+            start_time,
+            end_time,
+            break_minutes,
+            is_special,
+            _notes,
+            _region,
+        ) in records:
+            try:
+                worked, _scheduled, overtime, _night, _overnight, _s1, _s2, _s3 = calc.calc_day_hours(
+                    work_date, start_time, end_time, break_minutes, self.settings, is_special, department
+                )
+                total_worked += float(worked)
+                total_overtime += float(overtime)
+                total_scheduled += float(_scheduled)
+            except Exception:
+                pass
+
+        self._animate_stat(self.dash_stats["employees"], len(employees), decimals=0)
+        self._animate_stat(self.dash_stats["timesheets"], len(records), decimals=0)
+        self._animate_stat(self.dash_stats["worked"], total_worked, decimals=2)
+        self._animate_stat(self.dash_stats["overtime"], total_overtime, decimals=2)
+        self._animate_stat(self.dash_stats["scheduled"], total_scheduled, decimals=2)
+        completion = (total_worked / total_scheduled * 100) if total_scheduled else 0.0
+        self._animate_stat(self.dash_stats["completion"], completion, decimals=1)
+        self._render_progress(completion / 100 if completion else 0.0)
+
+        span_days = (end_dt - start_dt).days + 1
+        chart_days = min(14, max(7, span_days))
+        chart_start = end_dt - timedelta(days=chart_days - 1)
+        chart_start_str = chart_start.strftime("%Y-%m-%d")
+        recent_records = db.list_timesheets(start_date=chart_start_str, end_date=end_str, region=self._view_region())
+        values = []
+        labels = []
+        for i in range(chart_days - 1, -1, -1):
+            day = end_dt - timedelta(days=i)
+            day_str = day.strftime("%Y-%m-%d")
+            day_records = [r for r in recent_records if r[4] == day_str]
+            day_total = 0.0
+            for r in day_records:
+                try:
+                    worked, _scheduled, _o, _n, _ov, _s1, _s2, _s3 = calc.calc_day_hours(
+                        r[4], r[5], r[6], r[7], self.settings, r[8], r[3]
+                    )
+                    day_total += float(worked)
+                except Exception:
+                    pass
+            values.append(day_total)
+            labels.append(day.strftime("%d/%m"))
+        self._render_weekly_chart(values, labels)
+        if hasattr(self, "dash_chart_hint"):
+            self.dash_chart_hint.configure(text=f"{start_str} - {end_str} calisilan saat trendi")
+        if hasattr(self, "dash_chart_summary"):
+            current_total = sum(values)
+            avg_val = current_total / len(values) if values else 0.0
+            prev_total = 0.0
+            prev_start = start_dt - timedelta(days=span_days)
+            prev_end = start_dt - timedelta(days=1)
+            prev_records = db.list_timesheets(
+                start_date=prev_start.strftime("%Y-%m-%d"),
+                end_date=prev_end.strftime("%Y-%m-%d"),
+                region=self._view_region(),
+            )
+            for r in prev_records:
+                try:
+                    worked, _scheduled, _o, _n, _ov, _s1, _s2, _s3 = calc.calc_day_hours(
+                        r[4], r[5], r[6], r[7], self.settings, r[8], r[3]
+                    )
+                    prev_total += float(worked)
+                except Exception:
+                    pass
+            change_text = "-"
+            if prev_total > 0:
+                diff = ((current_total - prev_total) / prev_total) * 100
+                change_text = f"%{diff:+.1f}"
+            self.dash_chart_summary.configure(
+                text=f"Toplam: {current_total:.1f}s | Ortalama: {avg_val:.1f}s | Onceki doneme gore: {change_text}"
+            )
+
+        if hasattr(self, "dash_activity"):
+            lines = []
+            try:
+                if os.path.isfile(LOG_PATH):
+                    with open(LOG_PATH, "r", encoding="utf-8") as handle:
+                        lines = handle.readlines()[-12:]
+            except Exception:
+                lines = []
+            self.dash_activity.configure(state=tk.NORMAL)
+            self.dash_activity.delete("1.0", tk.END)
+            if lines:
+                self.dash_activity.insert(tk.END, "rainstaff@dashboard:~$ tail -n 12 log\n")
+                self.dash_activity.insert(tk.END, "".join(lines))
+            else:
+                self.dash_activity.insert(tk.END, "Aktivite bulunamadi.\n")
+            self.dash_activity.configure(state=tk.DISABLED)
 
     def _build_service_tab(self):
         fault_frame = ttk.LabelFrame(self.tab_service_body, text="Ariza Kaydi", style="Section.TLabelframe")
@@ -4991,6 +7515,7 @@ class PuantajApp(tk.Tk):
         self.admin_start_var = tk.StringVar()
         self.admin_end_var = tk.StringVar()
         self.admin_search_var = tk.StringVar()
+        self.admin_month_filter_var = tk.StringVar()
 
         ttk.Label(filter_frame, text="Calisan").pack(side=tk.LEFT, padx=(0, 6))
         self.admin_employee_combo = ttk.Combobox(
@@ -5012,11 +7537,20 @@ class PuantajApp(tk.Tk):
         start_frame.pack(side=tk.LEFT, padx=6)
         end_frame, self.admin_end_entry = create_labeled_date(row2, "Bitis", self.admin_end_var, 12)
         end_frame.pack(side=tk.LEFT, padx=6)
+        ttk.Label(row2, text="Ay").pack(side=tk.LEFT, padx=(12, 6))
+        month_entry = ttk.Entry(row2, textvariable=self.admin_month_filter_var, width=10)
+        month_entry.pack(side=tk.LEFT)
+        btn_month = ttk.Button(row2, text="Ayı Uygula", style="Accent.TButton", command=self.apply_admin_month_filter)
+        btn_month.pack(side=tk.LEFT, padx=6)
+        attach_tooltip(month_entry, "Ornek: 2026-02")
+        attach_tooltip(btn_month, "Secilen ayin baslangic ve bitisini uygular")
         clear_date_entry(self.admin_start_entry)
         clear_date_entry(self.admin_end_entry)
         ttk.Label(row2, text="Ara").pack(side=tk.LEFT, padx=(12, 6))
         ttk.Entry(row2, textvariable=self.admin_search_var, width=24).pack(side=tk.LEFT)
-        ttk.Button(row2, text="Guncelle", command=self.refresh_admin_summary).pack(side=tk.LEFT, padx=12)
+        btn_refresh = ttk.Button(row2, text="Guncelle", style="Accent.TButton", command=self.refresh_admin_summary)
+        btn_refresh.pack(side=tk.LEFT, padx=12)
+        attach_tooltip(btn_refresh, "Filtreleri uygula ve ozetleri yenile")
 
         summary = ttk.LabelFrame(content, text="Ozet", style="Section.TLabelframe")
         summary.pack(fill=tk.X, padx=6, pady=6)
@@ -5057,11 +7591,16 @@ class PuantajApp(tk.Tk):
         ttk.Label(row2, text="En Yuksek Gun").pack(side=tk.LEFT, padx=18)
         ttk.Label(row2, textvariable=self.admin_stats["max_daily"]).pack(side=tk.LEFT, padx=6)
 
-        table_frame = ttk.LabelFrame(content, text="Calisan Ozeti", style="Section.TLabelframe")
-        table_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        pane = ttk.PanedWindow(content, orient=tk.HORIZONTAL)
+        pane.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+
+        list_frame = ttk.LabelFrame(pane, text="Calisan Ozeti", style="Section.TLabelframe")
+        detail_frame = ttk.LabelFrame(pane, text="Detay", style="Section.TLabelframe")
+        pane.add(list_frame, weight=4)
+        pane.add(detail_frame, weight=2)
 
         self.admin_tree = ttk.Treeview(
-            table_frame,
+            list_frame,
             columns=("employee", "worked", "overtime", "night", "overnight", "special"),
             show="headings",
         )
@@ -5077,17 +7616,80 @@ class PuantajApp(tk.Tk):
         self.admin_tree.column("night", width=90)
         self.admin_tree.column("overnight", width=110)
         self.admin_tree.column("special", width=90)
-        admin_xscroll = ttk.Scrollbar(table_frame, orient=tk.HORIZONTAL, command=self.admin_tree.xview)
-        admin_yscroll = ttk.Scrollbar(table_frame, orient=tk.VERTICAL, command=self.admin_tree.yview)
+        admin_xscroll = ttk.Scrollbar(list_frame, orient=tk.HORIZONTAL, command=self.admin_tree.xview)
+        admin_yscroll = ttk.Scrollbar(list_frame, orient=tk.VERTICAL, command=self.admin_tree.yview)
         self.admin_tree.configure(xscrollcommand=admin_xscroll.set, yscrollcommand=admin_yscroll.set)
-        table_frame.columnconfigure(0, weight=1)
-        table_frame.rowconfigure(0, weight=1)
+        list_frame.columnconfigure(0, weight=1)
+        list_frame.rowconfigure(0, weight=1)
         self.admin_tree.grid(row=0, column=0, sticky="nsew")
         admin_yscroll.grid(row=0, column=1, sticky="ns")
         admin_xscroll.grid(row=1, column=0, sticky="ew")
         self.admin_tree.bind("<Button-3>", self.on_admin_right_click)
+        self.admin_tree.bind("<<TreeviewSelect>>", self.on_admin_select)
+        self._apply_tree_zebra(self.admin_tree)
         self.admin_menu = tk.Menu(self, tearoff=0)
         self.admin_menu.add_command(label="Detay", command=self.show_admin_employee_detail)
+
+        admin_action_row = ttk.Frame(list_frame)
+        admin_action_row.grid(row=2, column=0, sticky="ew", pady=6)
+        ttk.Button(
+            admin_action_row,
+            text="Secili Calisanlar Raporu",
+            style="Accent.TButton",
+            command=self.export_selected_admin_report,
+        ).pack(side=tk.LEFT, padx=6)
+        ttk.Button(
+            admin_action_row,
+            text="Seciliyi Kopyala",
+            command=self.copy_selected_admin_rows,
+        ).pack(side=tk.LEFT, padx=6)
+
+        self.admin_detail_name = tk.StringVar(value="-")
+        self.admin_detail_department = tk.StringVar(value="-")
+        self.admin_detail_title = tk.StringVar(value="-")
+        self.admin_detail_worked = tk.StringVar(value="-")
+        self.admin_detail_overtime = tk.StringVar(value="-")
+        self.admin_detail_night = tk.StringVar(value="-")
+        self.admin_detail_overnight = tk.StringVar(value="-")
+        self.admin_detail_special = tk.StringVar(value="-")
+        self.admin_detail_avg = tk.StringVar(value="-")
+
+        d1 = ttk.Frame(detail_frame)
+        d1.pack(fill=tk.X, pady=4)
+        ttk.Label(d1, text="Calisan").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(d1, textvariable=self.admin_detail_name).pack(side=tk.LEFT)
+        d2 = ttk.Frame(detail_frame)
+        d2.pack(fill=tk.X, pady=4)
+        ttk.Label(d2, text="Departman").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(d2, textvariable=self.admin_detail_department).pack(side=tk.LEFT)
+        d3 = ttk.Frame(detail_frame)
+        d3.pack(fill=tk.X, pady=4)
+        ttk.Label(d3, text="Unvan").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(d3, textvariable=self.admin_detail_title).pack(side=tk.LEFT)
+        d4 = ttk.Frame(detail_frame)
+        d4.pack(fill=tk.X, pady=4)
+        ttk.Label(d4, text="Calisilan").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(d4, textvariable=self.admin_detail_worked).pack(side=tk.LEFT)
+        d5 = ttk.Frame(detail_frame)
+        d5.pack(fill=tk.X, pady=4)
+        ttk.Label(d5, text="Fazla Mesai").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(d5, textvariable=self.admin_detail_overtime).pack(side=tk.LEFT)
+        d6 = ttk.Frame(detail_frame)
+        d6.pack(fill=tk.X, pady=4)
+        ttk.Label(d6, text="Gece").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(d6, textvariable=self.admin_detail_night).pack(side=tk.LEFT)
+        d7 = ttk.Frame(detail_frame)
+        d7.pack(fill=tk.X, pady=4)
+        ttk.Label(d7, text="Geceye Tasan").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(d7, textvariable=self.admin_detail_overnight).pack(side=tk.LEFT)
+        d8 = ttk.Frame(detail_frame)
+        d8.pack(fill=tk.X, pady=4)
+        ttk.Label(d8, text="Ozel Gun").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(d8, textvariable=self.admin_detail_special).pack(side=tk.LEFT)
+        d9 = ttk.Frame(detail_frame)
+        d9.pack(fill=tk.X, pady=4)
+        ttk.Label(d9, text="Ortalama/Gun").pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Label(d9, textvariable=self.admin_detail_avg).pack(side=tk.LEFT)
 
         alert_frame = ttk.LabelFrame(content, text="Uyarilar", style="Section.TLabelframe")
         alert_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
@@ -5111,8 +7713,14 @@ class PuantajApp(tk.Tk):
         alert_frame.columnconfigure(0, weight=1)
         alert_frame.rowconfigure(0, weight=1)
         self.admin_alert_tree.grid(row=0, column=0, sticky="nsew")
+        self._apply_tree_zebra(self.admin_alert_tree)
         alert_yscroll.grid(row=0, column=1, sticky="ns")
         alert_xscroll.grid(row=1, column=0, sticky="ew")
+        self.admin_alert_tree.bind("<<TreeviewSelect>>", self.on_admin_alert_select)
+        self.admin_alert_detail = tk.StringVar(value="-")
+        ttk.Label(alert_frame, textvariable=self.admin_alert_detail, foreground="#5f6a72").grid(
+            row=2, column=0, sticky="w", padx=6, pady=(4, 0)
+        )
 
         anomaly_frame = ttk.LabelFrame(content, text="Anomali Listesi", style="Section.TLabelframe")
         anomaly_frame.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
@@ -5134,8 +7742,14 @@ class PuantajApp(tk.Tk):
         anomaly_frame.columnconfigure(0, weight=1)
         anomaly_frame.rowconfigure(0, weight=1)
         self.admin_anomaly_tree.grid(row=0, column=0, sticky="nsew")
+        self._apply_tree_zebra(self.admin_anomaly_tree)
         anom_yscroll.grid(row=0, column=1, sticky="ns")
         anom_xscroll.grid(row=1, column=0, sticky="ew")
+        self.admin_anomaly_tree.bind("<<TreeviewSelect>>", self.on_admin_anomaly_select)
+        self.admin_anomaly_detail = tk.StringVar(value="-")
+        ttk.Label(anomaly_frame, textvariable=self.admin_anomaly_detail, foreground="#5f6a72").grid(
+            row=2, column=0, sticky="w", padx=6, pady=(4, 0)
+        )
 
         pack_frame = ttk.LabelFrame(content, text="Rapor Paketleme", style="Section.TLabelframe")
         pack_frame.pack(fill=tk.X, padx=6, pady=6)
@@ -5164,20 +7778,22 @@ class PuantajApp(tk.Tk):
         db.set_setting("saturday_start", self.sat_start_var.get().strip())
         db.set_setting("saturday_end", self.sat_end_var.get().strip())
         db.set_setting("logo_path", self.logo_path_var.get().strip())
-        db.set_setting("sync_enabled", "1" if self.sync_enabled_var.get() else "0")
-        db.set_setting("sync_url", self.sync_url_var.get().strip())
-        db.set_setting("sync_token", self.sync_token_var.get().strip())
         if self.is_admin:
             new_entry_region = self.admin_entry_region_var.get().strip() or "Ankara"
             new_view_region = self.admin_view_region_var.get().strip() or "Tum Bolgeler"
             db.set_setting("admin_entry_region", new_entry_region)
             db.set_setting("admin_view_region", new_view_region)
         self.settings = db.get_all_settings()
+        if hasattr(self, "settings_stats"):
+            try:
+                user_count = len(db.list_users())
+            except Exception:
+                user_count = 0
+            self._animate_stat(self.settings_stats["users"], user_count, decimals=0)
         if self.is_admin and prev_view_region != (self.admin_view_region_var.get().strip() or "Tum Bolgeler"):
             self._refresh_region_views()
         self._log_action("settings_save")
         messagebox.showinfo("Basarili", "Ayarlar kaydedildi.")
-        self.trigger_sync("settings")
 
     def open_log_folder(self):
         try:
