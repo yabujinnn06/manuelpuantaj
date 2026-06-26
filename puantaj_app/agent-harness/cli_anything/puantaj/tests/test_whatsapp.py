@@ -163,6 +163,39 @@ def test_preview_matrix_has_employee_rows_and_date_columns(temp_db, tmp_path):
                for v in second_row_headers)
 
 
+def test_preview_has_per_employee_sheets_with_daily_detail(temp_db, tmp_path):
+    from cli_anything.puantaj import preview_xlsx
+    entries = whatsapp.parse_text(SAMPLE, region="Ankara")
+    whatsapp.match_employees(entries, temp_db.list_employees(), region="Ankara")
+    payload = whatsapp.entries_to_dicts(entries)
+    out = tmp_path / "preview.xlsx"
+    preview_xlsx.build_preview(
+        str(out), payload,
+        employees_by_id={int(r[0]): {"full_name": r[1], "department": r[3], "region": r[5]}
+                         for r in temp_db.list_employees()},
+        settings=temp_db.get_all_settings(),
+        shift_templates=temp_db.list_shift_templates(),
+    )
+    from openpyxl import load_workbook
+    wb = load_workbook(str(out))
+    # Per-employee sheets for matched employees should exist
+    assert "Ahmet Yilmaz" in wb.sheetnames
+    assert "Mehmet Demir" in wb.sheetnames
+    ws = wb["Ahmet Yilmaz"]
+    # Baslik basligi 4. satirda
+    header_row = [ws.cell(row=4, column=c).value for c in range(1, 17)]
+    for need in ("Tarih", "Gun", "Durum", "Vardiya", "Giris", "Cikis",
+                 "Mola (dk)", "Calisilan (s)", "Plan (s)", "Fazla Mesai (s)",
+                 "Gece (s)", "Pazar Mesaisi (s)", "Ozel Gun"):
+        assert need in header_row, f"{need} basligi yok"
+    # 3 gun veri var, sondaki TOPLAM satiri
+    last_label = ws.cell(row=ws.max_row, column=1).value
+    assert last_label == "TOPLAM"
+    # Donem 2026-01-01..2026-01-03 (3 gun); 3 veri satiri + toplam = 4 row
+    # header_row=4, sonra 3 gun, sonra toplam -> max_row >= 8
+    assert ws.max_row >= 8
+
+
 def test_preview_analysis_has_per_employee_totals(temp_db, tmp_path):
     from cli_anything.puantaj import preview_xlsx
     entries = whatsapp.parse_text(SAMPLE, region="Ankara")

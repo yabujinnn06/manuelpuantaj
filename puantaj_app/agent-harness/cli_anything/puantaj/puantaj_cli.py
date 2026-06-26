@@ -650,6 +650,7 @@ def whatsapp_preview(ctx, input_file, text, records_json, default_date, region, 
         output, payload,
         employees_by_id=_employees_by_id(),
         settings=db.get_all_settings(),
+        shift_templates=db.list_shift_templates(),
     )
     _emit(ctx, {
         "status": "ok",
@@ -717,6 +718,7 @@ def whatsapp_ingest(ctx, input_file, text, default_date, region, preview_out, as
         preview_out, payload,
         employees_by_id=_employees_by_id(),
         settings=db.get_all_settings(),
+        shift_templates=db.list_shift_templates(),
     )
 
     summary = {

@@ -16,6 +16,7 @@ Sekmeler:
 from __future__ import annotations
 
 import os
+import re
 from collections import Counter, defaultdict
 from datetime import datetime, date, timedelta
 
@@ -106,16 +107,19 @@ def build_preview(
     employees_by_id: dict[int, dict] | None = None,
     settings: dict | None = None,
     title: str = "WhatsApp Puantaj On Izleme",
+    shift_templates: list[tuple] | None = None,
 ) -> str:
     """entries: whatsapp.entries_to_dicts ciktisi.
 
     employees_by_id: {id: {full_name, department, region}} sozlugu.
     settings: db.get_all_settings() (calc icin).
+    shift_templates: db.list_shift_templates() ciktisi. Vardiya tanima icin.
 
     Return: yazilan dosyanin tam yolu.
     """
     employees_by_id = employees_by_id or {}
     settings = settings or {}
+    shift_templates = shift_templates or []
     wb = Workbook()
 
     # 1) Ozet sekmesi
@@ -178,6 +182,9 @@ def build_preview(
 
     # 3) Calisan Analizi sekmesi
     _build_analysis_sheet(wb, entries, employees_by_id, settings)
+
+    # 3a) Her calisan icin ayri detay sekmesi
+    _build_per_employee_sheets(wb, entries, employees_by_id, settings, shift_templates)
 
     ws = wb.create_sheet("Detay")
     headers = [
@@ -593,6 +600,243 @@ def _merge_month_header(ws, month_label: str, col_start: int, col_end: int):
     cell.border = BORDER
     if col_end > col_start:
         ws.merge_cells(start_row=1, start_column=col_start, end_row=1, end_column=col_end)
+
+
+# ============================================================================
+# Her calisan icin ayri sekme (gun gun)
+# ============================================================================
+
+_SHEET_INVALID = re.compile(r"[\\/?*\[\]:]")
+
+
+def _sanitize_sheet_name(name: str, used: set[str]) -> str:
+    base = _SHEET_INVALID.sub("", name).strip() or "Kayit"
+    base = base[:31]
+    final = base
+    i = 1
+    while final.casefold() in {u.casefold() for u in used}:
+        suffix = f" ({i})"
+        final = (base[: 31 - len(suffix)]) + suffix
+        i += 1
+    used.add(final)
+    return final
+
+
+def _detect_shift(start_time, end_time, break_minutes, templates) -> str:
+    if not start_time or not end_time:
+        return ""
+    try:
+        bm = int(break_minutes or 0)
+    except (TypeError, ValueError):
+        bm = 0
+    for tpl in templates:
+        try:
+            _id, name, tpl_start, tpl_end, tpl_break = tpl
+        except ValueError:
+            continue
+        if str(tpl_start) == str(start_time) and str(tpl_end) == str(end_time) \
+                and int(tpl_break or 0) == bm:
+            return str(name)
+    # Esit mola yoksa saat eslesmesi
+    for tpl in templates:
+        try:
+            _id, name, tpl_start, tpl_end, _tpl_break = tpl
+        except ValueError:
+            continue
+        if str(tpl_start) == str(start_time) and str(tpl_end) == str(end_time):
+            return f"{name} (mola farkli)"
+    return "Ozel"
+
+
+def _sunday_hours(work_date, department, is_special, worked_hours):
+    if is_special or not worked_hours:
+        return 0.0
+    try:
+        from calc import is_sunday_non_stand  # type: ignore
+        if is_sunday_non_stand(work_date, department):
+            return float(worked_hours)
+    except Exception:
+        return 0.0
+    return 0.0
+
+
+def _build_per_employee_sheets(wb, entries, employees_by_id, settings, shift_templates):
+    """Her calisan icin gun gun puantaj detay sekmesi yaratir.
+
+    Sutunlar: Tarih, Gun, Durum, Vardiya, Giris, Cikis, Mola, Calisilan,
+    Plan, Fazla Mesai, Gece, Geceye Tasan, Pazar Mesaisi, Ozel Gun, Not, Uyari.
+    """
+    # Tarih araligini belirle
+    dates = sorted({_parse_date_str(e.get("work_date"))
+                    for e in entries if _parse_date_str(e.get("work_date"))})
+    if not dates:
+        return
+    span_start, span_end = dates[0], dates[-1]
+
+    # Calisan bazli grupla
+    grouped: dict[str, dict] = {}
+    for e in entries:
+        key, label = _employee_label(e, employees_by_id)
+        if key not in grouped:
+            info = employees_by_id.get(int(e["employee_id"])) if e.get("employee_id") else {}
+            grouped[key] = {
+                "label": label,
+                "department": (info or {}).get("department") or "",
+                "region": (info or {}).get("region") or e.get("region") or "",
+                "matched": e.get("employee_id") is not None,
+                "days": {},  # date -> entry dict
+            }
+        d = _parse_date_str(e.get("work_date"))
+        if d:
+            grouped[key]["days"][d] = e
+
+    used_sheet_names: set[str] = set()
+    sorted_keys = sorted(grouped.keys(), key=lambda k: grouped[k]["label"].casefold())
+    for key in sorted_keys:
+        g = grouped[key]
+        sheet_name = _sanitize_sheet_name(g["label"][:28], used_sheet_names)
+        ws = wb.create_sheet(sheet_name)
+
+        # Baslik bloku
+        ws.cell(row=1, column=1, value=g["label"]).font = TITLE_FONT
+        ws.merge_cells(start_row=1, start_column=1, end_row=1, end_column=16)
+        ws.row_dimensions[1].height = 26
+        meta = (f"Departman: {g['department'] or '-'}    "
+                f"Bolge: {g['region'] or '-'}    "
+                f"Esleme: {'OK' if g['matched'] else 'ESLEMEDI'}    "
+                f"Donem: {span_start.isoformat()} - {span_end.isoformat()}")
+        info_cell = ws.cell(row=2, column=1, value=meta)
+        info_cell.font = Font(italic=True, color="555555")
+        ws.merge_cells(start_row=2, start_column=1, end_row=2, end_column=16)
+
+        if not g["matched"]:
+            warn_cell = ws.cell(row=3, column=1,
+                                value="DIKKAT: Bu calisan DB'de eslesmedi; apply asamasinda atlanir.")
+            warn_cell.font = Font(bold=True, color="9C0006")
+            warn_cell.fill = BAD_FILL
+            ws.merge_cells(start_row=3, start_column=1, end_row=3, end_column=16)
+
+        # Sutun basliklari
+        headers = [
+            "Tarih", "Gun", "Durum", "Vardiya", "Giris", "Cikis", "Mola (dk)",
+            "Calisilan (s)", "Plan (s)", "Fazla Mesai (s)", "Gece (s)",
+            "Geceye Tasan (s)", "Pazar Mesaisi (s)", "Ozel Gun", "Not", "Uyari",
+        ]
+        header_row = 4 if not g["matched"] else 4
+        _write_headers(ws, header_row, headers)
+
+        # Veri satirlari (donem boyunca her gun)
+        out_row = header_row + 1
+        totals = {
+            "worked": 0.0, "plan": 0.0, "overtime": 0.0, "night": 0.0,
+            "overnight": 0.0, "sunday": 0.0,
+            "calisma": 0, "izin": 0, "rapor": 0, "gelmedi": 0,
+            "mazeret": 0, "tatil": 0, "ozel": 0,
+        }
+        for d in _iter_dates(span_start, span_end):
+            entry = g["days"].get(d)
+            weekday_label = WEEKDAY_TR[d.weekday()]
+            row_fill = None
+            if d.weekday() == 6:
+                row_fill = SPECIAL_FILL  # pazar
+            elif d.weekday() == 5:
+                row_fill = SECTION_FILL  # cumartesi
+            if entry:
+                status = entry.get("status") or "Diger"
+                start_t = entry.get("start_time") or ""
+                end_t = entry.get("end_time") or ""
+                break_min = int(entry.get("break_minutes") or 0)
+                is_special = bool(entry.get("is_special"))
+                shift_name = _detect_shift(start_t, end_t, break_min, shift_templates)
+                calc_res = _safe_calc(
+                    entry.get("work_date"), start_t, end_t, break_min,
+                    settings, is_special, g["department"],
+                )
+                if calc_res:
+                    worked, plan, overtime, night, overnight, *_ = calc_res
+                else:
+                    worked = plan = overtime = night = overnight = ""
+                sunday_hrs = _sunday_hours(
+                    entry.get("work_date"), g["department"], is_special,
+                    worked if isinstance(worked, (int, float)) else 0.0,
+                )
+                # Totals
+                if isinstance(worked, (int, float)):
+                    totals["worked"] += worked
+                if isinstance(plan, (int, float)):
+                    totals["plan"] += plan
+                if isinstance(overtime, (int, float)):
+                    totals["overtime"] += overtime
+                if isinstance(night, (int, float)):
+                    totals["night"] += night
+                if isinstance(overnight, (int, float)):
+                    totals["overnight"] += overnight
+                totals["sunday"] += sunday_hrs
+                status_counter = {
+                    "Calisti": "calisma", "Izinli": "izin", "Raporlu": "rapor",
+                    "Gelmedi": "gelmedi", "Mazeret": "mazeret", "Tatil": "tatil",
+                }.get(status)
+                if status_counter:
+                    totals[status_counter] += 1
+                if is_special:
+                    totals["ozel"] += 1
+
+                values = [
+                    d.isoformat(), weekday_label, status, shift_name,
+                    start_t, end_t, break_min,
+                    worked, plan, overtime, night, overnight, sunday_hrs,
+                    "Evet" if is_special else "Hayir",
+                    entry.get("notes") or "",
+                    " | ".join(entry.get("warnings") or []),
+                ]
+                base_fill = STATUS_FILL.get(status)
+                if is_special:
+                    base_fill = SPECIAL_FILL
+                elif entry.get("warnings"):
+                    base_fill = WARN_FILL
+            else:
+                values = [d.isoformat(), weekday_label, "-", "", "", "", "",
+                          "", "", "", "", "", "", "", "(kayit yok)", ""]
+                base_fill = EMPTY_DAY_FILL
+
+            for c, v in enumerate(values, start=1):
+                cell = ws.cell(row=out_row, column=c, value=v)
+                cell.border = BORDER
+                cell.alignment = Alignment(horizontal="center" if c not in (15, 16) else "left",
+                                           vertical="center")
+                if base_fill:
+                    cell.fill = base_fill
+                elif row_fill and not entry:
+                    cell.fill = row_fill
+            out_row += 1
+
+        # Toplam satiri
+        ws.cell(row=out_row, column=1, value="TOPLAM").font = Font(bold=True)
+        ws.cell(row=out_row, column=2, value="").fill = SECTION_FILL
+        total_values = [
+            "TOPLAM",
+            f"{(span_end - span_start).days + 1} gun",
+            f"C:{totals['calisma']} I:{totals['izin']} R:{totals['rapor']} "
+            f"G:{totals['gelmedi']} M:{totals['mazeret']} T:{totals['tatil']}",
+            f"Ozel: {totals['ozel']}",
+            "", "", "",
+            round(totals["worked"], 2), round(totals["plan"], 2),
+            round(totals["overtime"], 2), round(totals["night"], 2),
+            round(totals["overnight"], 2), round(totals["sunday"], 2),
+            "", "", "",
+        ]
+        for c, v in enumerate(total_values, start=1):
+            cell = ws.cell(row=out_row, column=c, value=v)
+            cell.fill = SECTION_FILL
+            cell.font = Font(bold=True)
+            cell.border = BORDER
+            cell.alignment = Alignment(horizontal="center", vertical="center")
+
+        ws.freeze_panes = ws.cell(row=header_row + 1, column=1).coordinate
+        # Sutun genislikleri
+        widths = [12, 8, 10, 18, 8, 8, 9, 11, 9, 13, 9, 13, 14, 10, 22, 22]
+        for i, w in enumerate(widths, start=1):
+            ws.column_dimensions[get_column_letter(i)].width = w
 
 
 # ============================================================================
