@@ -130,9 +130,60 @@ def test_preview_excel_is_written(temp_db, tmp_path):
     from openpyxl import load_workbook
     wb = load_workbook(path)
     assert "Ozet" in wb.sheetnames
+    assert "Calisan Matrisi" in wb.sheetnames
+    assert "Calisan Analizi" in wb.sheetnames
     assert "Detay" in wb.sheetnames
     assert "Gunluk Ozet" in wb.sheetnames
     assert "Uyarilar" in wb.sheetnames
+
+
+def test_preview_matrix_has_employee_rows_and_date_columns(temp_db, tmp_path):
+    from cli_anything.puantaj import preview_xlsx
+    entries = whatsapp.parse_text(SAMPLE, region="Ankara")
+    whatsapp.match_employees(entries, temp_db.list_employees(), region="Ankara")
+    payload = whatsapp.entries_to_dicts(entries)
+    out = tmp_path / "preview.xlsx"
+    preview_xlsx.build_preview(
+        str(out), payload,
+        employees_by_id={int(r[0]): {"full_name": r[1], "department": r[3], "region": r[5]}
+                         for r in temp_db.list_employees()},
+        settings=temp_db.get_all_settings(),
+    )
+    from openpyxl import load_workbook
+    wb = load_workbook(str(out))
+    ws = wb["Calisan Matrisi"]
+    # Calisanlar sutun A'da
+    employees_in_col_a = [ws.cell(row=r, column=1).value for r in range(3, ws.max_row + 1)]
+    employees_in_col_a = [v for v in employees_in_col_a if v]
+    assert any("Ahmet Yilmaz" in str(v) for v in employees_in_col_a)
+    assert any("Mehmet Demir" in str(v) for v in employees_in_col_a)
+    # 1-3 Ocak araligi 3 tarih sutunu olmali (D, E, F)
+    second_row_headers = [ws.cell(row=2, column=c).value for c in range(4, 7)]
+    assert all(v and ("01 " in str(v) or "02 " in str(v) or "03 " in str(v))
+               for v in second_row_headers)
+
+
+def test_preview_analysis_has_per_employee_totals(temp_db, tmp_path):
+    from cli_anything.puantaj import preview_xlsx
+    entries = whatsapp.parse_text(SAMPLE, region="Ankara")
+    whatsapp.match_employees(entries, temp_db.list_employees(), region="Ankara")
+    payload = whatsapp.entries_to_dicts(entries)
+    out = tmp_path / "preview.xlsx"
+    preview_xlsx.build_preview(
+        str(out), payload,
+        employees_by_id={int(r[0]): {"full_name": r[1], "department": r[3], "region": r[5]}
+                         for r in temp_db.list_employees()},
+        settings=temp_db.get_all_settings(),
+    )
+    from openpyxl import load_workbook
+    wb = load_workbook(str(out))
+    ws = wb["Calisan Analizi"]
+    headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
+    for need in ("Calisma G.", "Toplam (s)", "Fazla Mesai (s)", "Devamsizlik %"):
+        assert need in headers, f"{need} basligi yok"
+    # Son satir TOPLAM olmali
+    last_label = ws.cell(row=ws.max_row, column=1).value
+    assert last_label == "TOPLAM"
 
 
 def test_apply_writes_timesheets_and_attendance(temp_db):
