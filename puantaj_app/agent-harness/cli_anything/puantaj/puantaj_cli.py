@@ -41,6 +41,20 @@ if APP_DIR not in sys.path:
 import puantaj_db as db  # noqa: E402
 import calc as calc_mod  # noqa: E402
 
+from cli_anything.puantaj import whatsapp as wa_mod  # noqa: E402
+from cli_anything.puantaj import bulk as bulk_mod  # noqa: E402
+
+
+def _load_preview_mod():
+    """Lazy import: openpyxl olmadan da temel komutlar calissin."""
+    try:
+        from cli_anything.puantaj import preview_xlsx as preview_mod  # noqa: WPS433
+        return preview_mod
+    except ImportError as e:
+        raise click.ClickException(
+            f"Onizleme modulu yuklenemedi ({e}). Gerekli: pip install openpyxl"
+        )
+
 EMP_COLS = ["id", "full_name", "identity_no", "department", "title", "region"]
 TS_COLS = ["id", "employee_id", "full_name", "department", "work_date",
            "start_time", "end_time", "break_minutes", "is_special", "notes", "region"]
@@ -510,14 +524,29 @@ def users(ctx):
 
 
 # ---------------------------------------------------------------- report
+def _month_range(month_str: str) -> tuple[str, str]:
+    """'2026-01' -> ('2026-01-01', '2026-01-31')."""
+    import calendar as _cal
+    from datetime import date as _date
+    try:
+        year, mon = month_str.split("-")
+        y, m = int(year), int(mon)
+    except Exception:
+        raise click.ClickException("--month formati hatali. Ornek: 2026-01")
+    last = _cal.monthrange(y, m)[1]
+    return _date(y, m, 1).isoformat(), _date(y, m, last).isoformat()
+
+
 @cli.command("report")
 @click.option("--output", "-o", required=True, help="Hedef .xlsx yolu")
 @click.option("--employee-id", type=int, default=None)
-@click.option("--start-date", required=True)
-@click.option("--end-date", required=True)
+@click.option("--start-date", default=None, help="YYYY-MM-DD (veya --month verin).")
+@click.option("--end-date", default=None, help="YYYY-MM-DD (veya --month verin).")
+@click.option("--month", "month_str", default=None,
+              help="'YYYY-MM' verirseniz baslangic/bitis otomatik secilir.")
 @click.option("--region", default=None)
 @click.pass_context
-def report_cmd(ctx, output, employee_id, start_date, end_date, region):
+def report_cmd(ctx, output, employee_id, start_date, end_date, month_str, region):
     """Excel puantaj raporu uretir (openpyxl gerekir)."""
     try:
         import report as report_mod
@@ -525,6 +554,10 @@ def report_cmd(ctx, output, employee_id, start_date, end_date, region):
         raise click.ClickException(
             f"Rapor modulu yuklenemedi ({e}). Gerekli: pip install openpyxl Pillow reportlab"
         )
+    if month_str:
+        start_date, end_date = _month_range(month_str)
+    if not start_date or not end_date:
+        raise click.ClickException("--start-date ve --end-date veya --month gerekli.")
     ts = db.list_timesheets(employee_id=employee_id, start_date=start_date,
                             end_date=end_date, region=region)
     att = db.list_attendance_records(employee_id=employee_id, start_date=start_date,
@@ -536,7 +569,258 @@ def report_cmd(ctx, output, employee_id, start_date, end_date, region):
                              attendance_records=att, leave_records=lv,
                              start_date=start_date, end_date=end_date)
     _emit(ctx, {"status": "ok", "output": os.path.abspath(output),
-                "rows": len(ts)})
+                "rows": len(ts), "start_date": start_date, "end_date": end_date})
+
+
+# ---------------------------------------------------------------- whatsapp
+@cli.group("whatsapp")
+def whatsapp():
+    """WhatsApp grup mesajindan toplu puantaj (parse -> preview -> apply)."""
+
+
+def _read_input_text(input_file, text):
+    if input_file and input_file != "-":
+        with open(input_file, "r", encoding="utf-8") as f:
+            return f.read()
+    if input_file == "-":
+        return sys.stdin.read()
+    if text:
+        return text
+    raise click.ClickException("--input veya --text vermelisiniz (--input - ile stdin).")
+
+
+def _employees_by_id():
+    return {
+        int(row[0]): {
+            "full_name": row[1],
+            "identity_no": row[2],
+            "department": row[3],
+            "title": row[4],
+            "region": row[5] if len(row) > 5 else None,
+        }
+        for row in db.list_employees()
+    }
+
+
+@whatsapp.command("parse")
+@click.option("--input", "input_file", default=None,
+              help="UTF-8 metin dosyasi. '-' verilirse stdin.")
+@click.option("--text", default=None, help="Komut satirinda metin.")
+@click.option("--default-date", default=None, help="Tarih bulunamadigi gun icin varsayilan (YYYY-MM-DD).")
+@click.option("--region", default=None, help="Tum kayitlar icin bolge.")
+@click.option("--out-json", default=None, help="Parse ciktisini bu JSON dosyaya yaz.")
+@click.pass_context
+def whatsapp_parse(ctx, input_file, text, default_date, region, out_json):
+    """Mesaji ayristirir ve JSON dondurur (DB'ye yazmaz)."""
+    raw = _read_input_text(input_file, text)
+    entries = wa_mod.parse_text(raw, default_date=default_date, region=region)
+    wa_mod.match_employees(entries, db.list_employees(), region=region)
+    payload = wa_mod.entries_to_dicts(entries)
+    if out_json:
+        with open(out_json, "w", encoding="utf-8") as f:
+            json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
+    _emit(ctx, payload if ctx.obj.get("json") else {
+        "kayit_sayisi": len(payload),
+        "eslesen": sum(1 for e in payload if e.get("employee_id")),
+        "eslemeyen": sum(1 for e in payload if not e.get("employee_id")),
+        "uyarili": sum(1 for e in payload if e.get("warnings")),
+        "out_json": os.path.abspath(out_json) if out_json else None,
+    })
+
+
+@whatsapp.command("preview")
+@click.option("--input", "input_file", default=None)
+@click.option("--text", default=None)
+@click.option("--records-json", default=None, help="Onceden parse edilmis JSON dosyasi.")
+@click.option("--default-date", default=None)
+@click.option("--region", default=None)
+@click.option("--output", "-o", required=True, help="Hedef .xlsx onizleme dosyasi.")
+@click.pass_context
+def whatsapp_preview(ctx, input_file, text, records_json, default_date, region, output):
+    """WhatsApp mesajini parse edip renkli Excel onizlemesi olusturur."""
+    if records_json:
+        with open(records_json, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+    else:
+        raw = _read_input_text(input_file, text)
+        entries = wa_mod.parse_text(raw, default_date=default_date, region=region)
+        wa_mod.match_employees(entries, db.list_employees(), region=region)
+        payload = wa_mod.entries_to_dicts(entries)
+    out_path = _load_preview_mod().build_preview(
+        output, payload,
+        employees_by_id=_employees_by_id(),
+        settings=db.get_all_settings(),
+    )
+    _emit(ctx, {
+        "status": "ok",
+        "output": out_path,
+        "kayit_sayisi": len(payload),
+        "eslemeyen": sum(1 for e in payload if not e.get("employee_id")),
+    })
+
+
+@whatsapp.command("apply")
+@click.option("--records", "records_json", default=None, help="Parse JSON dosyasi.")
+@click.option("--xlsx", default=None, help="Onaylanmis preview Excel dosyasi (Detay sekmesi okunur).")
+@click.option("--region", default=None, help="Kayit yapilirken kullanilacak varsayilan bolge.")
+@click.option("--overwrite/--no-overwrite", default=False,
+              help="Ayni gun + calisan icin onceki timesheet'leri sil.")
+@click.option("--yes", "assume_yes", is_flag=True, help="Onay sormadan uygula.")
+@click.pass_context
+def whatsapp_apply(ctx, records_json, xlsx, region, overwrite, assume_yes):
+    """Onaylanmis kayitlari DB'ye toplu yazar."""
+    if not records_json and not xlsx:
+        raise click.ClickException("--records veya --xlsx vermelisiniz.")
+    if xlsx:
+        entries = _load_preview_mod().read_entries_from_xlsx(xlsx)
+    else:
+        with open(records_json, "r", encoding="utf-8") as f:
+            entries = json.load(f)
+    if not entries:
+        raise click.ClickException("Uygulanacak kayit yok.")
+    if not assume_yes and sys.stdin.isatty() and not ctx.obj.get("json"):
+        click.echo(f"{len(entries)} kayit DB'ye yazilacak. Devam edilsin mi? [y/N] ", nl=False)
+        ans = input().strip().lower()
+        if ans not in ("y", "yes", "e", "evet"):
+            raise click.ClickException("Iptal edildi.")
+    result = bulk_mod.apply_entries(
+        db, entries, default_region=region, source="whatsapp", overwrite=overwrite,
+    )
+    _emit(ctx, result.to_dict())
+
+
+@whatsapp.command("ingest")
+@click.option("--input", "input_file", default=None)
+@click.option("--text", default=None)
+@click.option("--default-date", default=None)
+@click.option("--region", default=None)
+@click.option("--preview", "preview_out", default=None,
+              help="Onizleme xlsx yolu (default: scratch dizininde).")
+@click.option("--yes", "assume_yes", is_flag=True,
+              help="On izleme olusturulduktan sonra dogrudan apply et.")
+@click.option("--overwrite/--no-overwrite", default=False)
+@click.pass_context
+def whatsapp_ingest(ctx, input_file, text, default_date, region, preview_out, assume_yes, overwrite):
+    """Tek komutla: parse + preview + (onay sonrasi) apply."""
+    raw = _read_input_text(input_file, text)
+    entries = wa_mod.parse_text(raw, default_date=default_date, region=region)
+    wa_mod.match_employees(entries, db.list_employees(), region=region)
+    payload = wa_mod.entries_to_dicts(entries)
+
+    if not preview_out:
+        from datetime import datetime as _dt
+        preview_out = os.path.join(
+            os.path.dirname(db.DB_PATH),
+            f"whatsapp_puantaj_onizleme_{_dt.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+        )
+    out_path = _load_preview_mod().build_preview(
+        preview_out, payload,
+        employees_by_id=_employees_by_id(),
+        settings=db.get_all_settings(),
+    )
+
+    summary = {
+        "preview": out_path,
+        "kayit_sayisi": len(payload),
+        "eslemeyen": sum(1 for e in payload if not e.get("employee_id")),
+        "uyarili": sum(1 for e in payload if e.get("warnings")),
+    }
+
+    if not assume_yes:
+        if not sys.stdin.isatty() or ctx.obj.get("json"):
+            _emit(ctx, {**summary, "status": "preview_only",
+                        "info": "Onaylamak icin: cli-anything-puantaj whatsapp apply --xlsx <preview> --yes"})
+            return
+        click.echo(f"On izleme: {out_path}")
+        click.echo(f"Toplam {summary['kayit_sayisi']} kayit, "
+                   f"{summary['eslemeyen']} eslemeyen, {summary['uyarili']} uyarili.")
+        click.echo("Excel'i incele. DB'ye yazilsin mi? [y/N] ", nl=False)
+        ans = input().strip().lower()
+        if ans not in ("y", "yes", "e", "evet"):
+            _emit(ctx, {**summary, "status": "cancelled"})
+            return
+
+    result = bulk_mod.apply_entries(
+        db, payload, default_region=region, source="whatsapp", overwrite=overwrite,
+    )
+    _emit(ctx, {**summary, **result.to_dict(), "status": "applied"})
+
+
+# ---------------------------------------------------------------- department
+@cli.group("department")
+def department():
+    """Departman yonetimi (employees.department TEXT alani uzerinden)."""
+
+
+@department.command("list")
+@click.option("--region", default=None)
+@click.pass_context
+def department_list(ctx, region):
+    """Mevcut departmanlari ve calisan sayilarini listeler."""
+    rows = db.list_employees(region=region)
+    counter = {}
+    for r in rows:
+        dep = (r[3] or "(yok)").strip() or "(yok)"
+        counter[dep] = counter.get(dep, 0) + 1
+    data = [{"department": k, "calisan_sayisi": v}
+            for k, v in sorted(counter.items(), key=lambda x: -x[1])]
+    _emit(ctx, data, ["department", "calisan_sayisi"])
+
+
+@department.command("employees")
+@click.argument("name")
+@click.option("--region", default=None)
+@click.pass_context
+def department_employees(ctx, name, region):
+    """Departmandaki calisanlari listeler (buyuk/kucuk harf duyarsiz)."""
+    target = _norm_text(name)
+    rows = [r for r in db.list_employees(region=region) if _norm_text(r[3]) == target]
+    _emit(ctx, _rows(rows, EMP_COLS), EMP_COLS)
+
+
+@department.command("rename")
+@click.option("--from", "old_name", required=True, help="Mevcut departman adi.")
+@click.option("--to", "new_name", required=True, help="Yeni departman adi.")
+@click.option("--region", default=None)
+@click.pass_context
+def department_rename(ctx, old_name, new_name, region):
+    """Bir departmanin tum calisanlarini yeni isme atar."""
+    target = _norm_text(old_name)
+    rows = [r for r in db.list_employees(region=region) if _norm_text(r[3]) == target]
+    count = 0
+    for r in rows:
+        eid, full_name, identity_no, _dep, title, emp_region = r[:6]
+        db.update_employee(eid, full_name, identity_no, new_name, title, emp_region)
+        count += 1
+    _emit(ctx, {"status": "ok", "renamed": count, "from": old_name, "to": new_name})
+
+
+@department.command("assign")
+@click.argument("employee_id", type=int)
+@click.option("--department", required=True)
+@click.pass_context
+def department_assign(ctx, employee_id, department):
+    """Bir calisanin departmanini degistirir."""
+    emp = _get_employee(employee_id)
+    db.update_employee(employee_id, emp["full_name"], emp["identity_no"],
+                       department, emp["title"], emp["region"])
+    _emit(ctx, {"status": "ok", "employee_id": employee_id, "department": department})
+
+
+# ---------------------------------------------------------------- timesheet bulk
+@timesheet.command("bulk")
+@click.option("--records", "records_json", required=True, help="JSON dosyasi.")
+@click.option("--region", default=None, help="Eksik bolge icin varsayilan.")
+@click.option("--overwrite/--no-overwrite", default=False)
+@click.pass_context
+def timesheet_bulk(ctx, records_json, region, overwrite):
+    """JSON kayit listesinden toplu puantaj girer (whatsapp apply ile ayni motor)."""
+    with open(records_json, "r", encoding="utf-8") as f:
+        entries = json.load(f)
+    result = bulk_mod.apply_entries(
+        db, entries, default_region=region, source="cli_bulk", overwrite=overwrite,
+    )
+    _emit(ctx, result.to_dict())
 
 
 # ---------------------------------------------------------------- REPL

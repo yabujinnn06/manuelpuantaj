@@ -45,3 +45,40 @@
 - `setup.py`, PEP 420 namespace: `cli_anything.puantaj`,
   paket adi `cli-anything-puantaj`, console_scripts entry point.
 - `pip install -e .` ile kuruldu, PATH'te dogrulandi.
+
+## Phase 8: WhatsApp toplu puantaj (yeni)
+
+Modul: `cli_anything/puantaj/whatsapp.py`, `preview_xlsx.py`, `bulk.py`.
+
+Akis (parse -> preview -> apply):
+
+1. `cli-anything-puantaj whatsapp parse --input msg.txt --region Ankara --out-json p.json`
+   - WhatsApp disa aktarim (`[01.01.2026 09:15] Sender: ...`) ve serbest grup
+     metnini ayristirir, tarih basliklarini takip eder, calisanlari fuzzy
+     (token-Jaccard) ile DB'deki kayitlarla eslestirir.
+   - status: Calisti / Izinli / Raporlu / Gelmedi / Mazeret / Tatil / Diger.
+   - "08-17", "08:00-17:00", "mola 60", "60 dk", "ozel gun" yakalanir.
+
+2. `cli-anything-puantaj whatsapp preview --input msg.txt -o onay.xlsx`
+   - Onay icin renkli Excel; sekmeler: Ozet, Detay, Gunluk Ozet, Uyarilar, JSON.
+   - Calisti = yesil, Izinli/Mazeret = sari, Raporlu/Gelmedi = kirmizi, Tatil = mor.
+   - calc.calc_day_hours ile calisilan/plan/fazla/gece sutunlari onceden hesaplanir.
+
+3. `cli-anything-puantaj whatsapp apply --xlsx onay.xlsx --region Ankara --yes`
+   - Onaylanmis Excel'in Detay sekmesindeki son hali okunur ve DB'ye yazilir.
+   - `--records p.json` ile JSON dosyasi da kabul edilir.
+   - `--overwrite` ayni gun + calisan icin onceki timesheet'leri siler.
+   - Calisti -> timesheets + attendance_records; digerleri -> sadece attendance.
+
+4. `cli-anything-puantaj whatsapp ingest --input msg.txt --region Ankara`
+   - Tek komutla parse + preview olusturur; interaktif TTY'de kullaniciya
+     onay sorar, `--yes` ile dogrudan apply eder.
+
+## Phase 9: Yonetim komutlari (yeni)
+
+- `department list/employees/rename/assign` - departman alanini (employees.department)
+  yonetir. Departman ayri tablo olmadigi icin tum islemler bu TEXT alani uzerinden
+  yapilir.
+- `timesheet bulk --records p.json` - whatsapp apply ile ayni motor; JSON'dan
+  toplu puantaj girisi yapar.
+- `report --month YYYY-MM` - tek argumanla ay raporu uretir.
