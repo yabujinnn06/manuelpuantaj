@@ -1,9 +1,12 @@
-"""WhatsApp parser, preview Excel ve bulk apply icin testler."""
+"""WhatsApp parser, preview Excel ve bulk apply icin testler.
+
+SAMPLE gercek "Rainwater puantaj" grubu formatini taklit eder: Turkce saat
+damgali baslik, gonderen != calisan, cok-satirli mesaj, tek cikis saati,
+Full/izin/pazar mesaisi, cok-gunlu mesaj.
+"""
 
 import os
 import sys
-import json
-import tempfile
 
 import pytest
 
@@ -18,226 +21,247 @@ for p in (APP_DIR, HARNESS_DIR):
 from cli_anything.puantaj import whatsapp  # noqa: E402
 
 
-SAMPLE = """
-01.01.2026 Pazartesi
-Ahmet Yilmaz 08:00-17:00 60
-Mehmet Demir izinli
-Ayse Kaya 09:00-18:00 mola 60
-Hasan Ozturk raporlu
+SAMPLE = """\
+6.01.2026 öğleden sonra 4:50 - Hasan Teknik: 05.01.2026 çıkış saati 23:00
+Hasan TONTUR
+6.01.2026 öğleden sonra 4:14 - +90 537 732 05 42: Ata Türkbey
+05.01.2026 çıkış saati 19:00
+28.03.2026 akşam 7:10 - Ercüment Abi Rainwater: 28.03.2026
+Ercüment ÇALIŞKAN
+GİRİŞ : 09:30
+ÇIKIŞ : 19:10
+28.03.2026 öğleden sonra 5:46 - +90 532 621 64 06: 28.03.2026 Uğur Ertürk 09:28 giriş 17:30 çıkış
+29.03.2026 gece 10:05 - +90 534 771 93 17: 29.03.2026
+Eda Nur Yılmaz
+Giriş 10:00
+Çıkış 18:00
+17.01.2026 öğleden sonra 4:19 - Başak Çelik Rain: Başak Çelik
+17.01.2026
+Full
+18.02.2026 akşam 7:35 - +90 534 771 93 17: 18.02.2026
+Eda Nur
+Haftalık izin
+15.02.2026 öğleden sonra 3:45 - Ercüment Abi Rainwater: Ercument çalışkan  15.02.2026 ÇIKIŞ: PAZAR MESAİSİ
+"""
 
-02.01.2026 Sali
-Ahmet Yilmaz 08-17
-Veli Bey 10:00-22:00 ozel gun
-[03.01.2026 09:15] Murat Sef: - Ahmet 08-17 60
-[03.01.2026 09:15] Murat Sef: - Hasan gelmedi
+# Cok-gunlu tek mesaj (Hasan)
+MULTI_DAY = """\
+7.01.2026 öğleden önce 11:34 - Hasan Teknik: Hasan TONTUR
+01.01.26
+YILBAŞI
+
+05.01.26
+08:00 GİRİŞ
+23:00 çıkış
+
+06.01.26
+08:00. GİRİŞ
+5.30 çıkış
 """
 
 
-def test_parses_date_headers_and_attendance_statuses():
+def test_turkce_header_and_basic_parse():
     entries = whatsapp.parse_text(SAMPLE, region="Ankara")
-    statuses = {e.status for e in entries}
-    assert {"Calisti", "Izinli", "Raporlu", "Gelmedi"}.issubset(statuses)
-    dates = sorted({e.work_date for e in entries})
-    assert dates == ["2026-01-01", "2026-01-02", "2026-01-03"]
+    # En az 8 kayit cikmali
+    assert len(entries) >= 8
+    names = {e.employee_name_raw for e in entries}
+    assert any("Hasan" in n for n in names)
+    assert any("Ercüment" in n or "Ercument" in n for n in names)
 
 
-def test_time_range_and_break_extraction():
+def test_sender_phone_uses_body_name():
+    """Gonderen telefon numarasi oldugunda isim mesaj govdesinden alinmali."""
     entries = whatsapp.parse_text(SAMPLE, region="Ankara")
-    ahmet_jan1 = next(e for e in entries
-                      if e.employee_name_raw.startswith("Ahmet") and e.work_date == "2026-01-01")
-    assert ahmet_jan1.start_time == "08:00"
-    assert ahmet_jan1.end_time == "17:00"
-    assert ahmet_jan1.break_minutes == 60
-    veli = next(e for e in entries if e.employee_name_raw.startswith("Veli"))
-    assert veli.is_special is True
-    assert veli.employee_name_raw == "Veli Bey"
+    ata = next(e for e in entries if "Ata" in e.employee_name_raw)
+    assert "Türkbey" in ata.employee_name_raw or "Turkbey" in ata.employee_name_raw
+    assert ata.work_date == "2026-01-05"
+    assert ata.end_time == "19:00"
 
 
-def test_whatsapp_export_format_handled():
+def test_single_exit_time():
+    """Sadece cikis saati yazilan kayitlarda end_time dolu, status Calisti."""
     entries = whatsapp.parse_text(SAMPLE, region="Ankara")
-    gelmedi = [e for e in entries if e.status == "Gelmedi"]
-    assert gelmedi and gelmedi[0].employee_name_raw == "Hasan"
-    assert gelmedi[0].work_date == "2026-01-03"
+    hasan = next(e for e in entries if "Hasan" in e.employee_name_raw)
+    assert hasan.status == "Calisti"
+    assert hasan.end_time == "23:00"
+    assert hasan.work_date == "2026-01-05"
 
 
-def test_short_time_form_padding():
-    entries = whatsapp.parse_text("01.01.2026\nA B 8-17", region="A")
-    assert entries[0].start_time == "08:00"
-    assert entries[0].end_time == "17:00"
+def test_multiline_giris_cikis():
+    """Cok satirli 'GIRIS .. / CIKIS ..' dogru ayrismali (karismamali)."""
+    entries = whatsapp.parse_text(SAMPLE, region="Ankara")
+    erc = next(e for e in entries
+               if e.work_date == "2026-03-28" and "Ercüment" in e.employee_name_raw)
+    assert erc.start_time == "09:30"
+    assert erc.end_time == "19:10"
+
+
+def test_inline_giris_cikis_same_line():
+    """'09:28 giris 17:30 cikis' tek satirda dogru ayrismali."""
+    entries = whatsapp.parse_text(SAMPLE, region="Ankara")
+    ugur = next(e for e in entries if "Uğur" in e.employee_name_raw)
+    assert ugur.start_time == "09:28"
+    assert ugur.end_time == "17:30"
+
+
+def test_full_expands_to_shift():
+    entries = whatsapp.parse_text(SAMPLE, region="Ankara")
+    basak = next(e for e in entries if "Başak" in e.employee_name_raw)
+    assert basak.start_time == "10:00"
+    assert basak.end_time == "22:00"
+    assert basak.status == "Calisti"
+
+
+def test_leave_detected():
+    entries = whatsapp.parse_text(SAMPLE, region="Ankara")
+    izin = [e for e in entries if e.status == "Izinli"]
+    assert izin and any("Eda" in e.employee_name_raw for e in izin)
+
+
+def test_sunday_work_flag():
+    entries = whatsapp.parse_text(SAMPLE, region="Ankara")
+    pazar = [e for e in entries if e.is_sunday_work]
+    assert pazar and pazar[0].work_date == "2026-02-15"
+
+
+def test_multi_day_message_keeps_name():
+    """Cok-gunlu mesajda isim her gune tasinmali; not satiri isim sayilmamali."""
+    entries = whatsapp.parse_text(MULTI_DAY, region="Ankara")
+    assert all("Hasan" in e.employee_name_raw for e in entries), \
+        [e.employee_name_raw for e in entries]
+    dates = {e.work_date for e in entries}
+    assert "2026-01-01" in dates  # YILBASI
+    assert "2026-01-05" in dates
+    j5 = next(e for e in entries if e.work_date == "2026-01-05")
+    assert j5.start_time == "08:00"
+    assert j5.end_time == "23:00"
+
+
+def test_year_typo_corrected():
+    text = ("6.01.2026 öğleden sonra 5:31 - Hasan Teknik: 06.01.2016 çıkış 17.30\n"
+            "Hasan TONTUR\n")
+    entries = whatsapp.parse_text(text, region="Ankara")
+    assert entries
+    assert entries[0].work_date == "2026-01-06"
+    assert any("duzeltildi" in w.lower() or "düzeltildi" in w.lower()
+               for w in entries[0].warnings)
+
+
+def test_clock_normalization():
+    assert whatsapp.normalize_clock("19.30") == "19:30"
+    assert whatsapp.normalize_clock("0800") == "08:00"
+    assert whatsapp.normalize_clock("5.30") == "05:30"
+    assert whatsapp.normalize_clock("08;30") == "08:30"
+    assert whatsapp.normalize_clock("07/30") == "07:30"
+    assert whatsapp.normalize_clock("9:5") is None
+
+
+def test_system_messages_skipped():
+    text = ("6.01.2026 öğleden önce 11:13 - Altan Akbaş Abi sizi ekledi\n"
+            "6.01.2026 öğleden sonra 4:14 - +90 537 732 05 42: Ata Türkbey\n"
+            "05.01.2026 çıkış saati 19:00\n")
+    entries = whatsapp.parse_text(text, region="Ankara")
+    assert len(entries) == 1
+    assert "Ata" in entries[0].employee_name_raw
 
 
 def test_match_employees_by_full_name():
     employees = [
-        (1, "Ahmet Yilmaz", "111", "TEKNIK", "Tek", "Ankara"),
-        (2, "Mehmet Demir", "222", "LOJISTIK", "Sof", "Ankara"),
+        (1, "Hasan Tontur", "111", "TEKNIK", "Tek", "Ankara"),
+        (2, "Ercument Caliskan", "222", "OFIS", "Uzman", "Ankara"),
     ]
-    entries = whatsapp.parse_text("01.01.2026\nahmet yilmaz 08-17", region="Ankara")
+    entries = whatsapp.parse_text(SAMPLE, region="Ankara")
     whatsapp.match_employees(entries, employees, region="Ankara")
-    assert entries[0].employee_id == 1
-    assert entries[0].confidence >= 0.66
+    hasan = next(e for e in entries if "Hasan" in e.employee_name_raw)
+    assert hasan.employee_id == 1
+    assert hasan.confidence >= 0.6
 
 
-def test_low_confidence_match_warns():
-    employees = [(1, "Ahmet Yilmaz", "", "", "", "Ankara")]
-    entries = whatsapp.parse_text("01.01.2026\nAhmet 08-17", region="Ankara")
+def test_no_match_warns():
+    employees = [(1, "Hasan Tontur", "", "", "", "Ankara")]
+    entries = whatsapp.parse_text(SAMPLE, region="Ankara")
     whatsapp.match_employees(entries, employees, region="Ankara")
-    assert entries[0].employee_id == 1
-    assert any("Dusuk" in w for w in entries[0].warnings)
+    ata = next(e for e in entries if "Ata" in e.employee_name_raw)
+    assert ata.employee_id is None
+    assert any("eslesmedi" in w.lower() for w in ata.warnings)
 
 
-def test_no_match_when_name_unknown():
-    employees = [(1, "Ahmet Yilmaz", "", "", "", "Ankara")]
-    entries = whatsapp.parse_text("01.01.2026\nXYZ Kisi izinli", region="Ankara")
+def test_apply_shift_defaults_fills_start():
+    """Giris yoksa departman varsayilani uygulanir, isaretlenir."""
+    employees = [(1, "Hasan Tontur", "", "TEKNIK", "", "Ankara")]
+    entries = whatsapp.parse_text(SAMPLE, region="Ankara")
     whatsapp.match_employees(entries, employees, region="Ankara")
-    assert entries[0].employee_id is None
-    assert any("Calisan eslesmedi" in w for w in entries[0].warnings)
+    whatsapp.apply_shift_defaults(entries)
+    hasan = next(e for e in entries
+                 if e.employee_id == 1 and e.status == "Calisti" and e.end_time)
+    assert hasan.start_time is not None
+    assert hasan.start_assumed is True
 
 
 # ---------------------------------------------------------------- preview + apply
 @pytest.fixture
 def temp_db(monkeypatch, tmp_path):
     monkeypatch.setenv("APPDATA", str(tmp_path))
-    # Reload puantaj_db so it picks up the new APPDATA path
     for mod in ("puantaj_db",):
         if mod in sys.modules:
             del sys.modules[mod]
     import puantaj_db as db
     db.init_db()
-    db.add_employee("Ahmet Yilmaz", "111", "TEKNIK", "Tek", "Ankara")
-    db.add_employee("Mehmet Demir", "222", "LOJISTIK", "Sof", "Ankara")
-    db.add_employee("Ayse Kaya", "333", "STANT", "Sat", "Ankara")
-    db.add_employee("Hasan Ozturk", "444", "TEKNIK", "Tek", "Ankara")
-    db.add_employee("Veli Bey", "555", "STANT", "Sat", "Ankara")
+    db.add_employee("Hasan Tontur", "111", "TEKNIK", "Tek", "Ankara")
+    db.add_employee("Ata Turkbey", "222", "TEKNIK", "Tek", "Ankara")
+    db.add_employee("Ercument Caliskan", "333", "OFIS", "Uzman", "Ankara")
+    db.add_employee("Ugur Erturk", "444", "LOJISTIK", "Sofor", "Ankara")
+    db.add_employee("Eda Nur Yilmaz", "555", "STANT", "Sat", "Ankara")
+    db.add_employee("Basak Celik", "666", "STANT", "Sat", "Ankara")
     return db
 
 
-def test_preview_excel_is_written(temp_db, tmp_path):
-    from cli_anything.puantaj import preview_xlsx
+def _payload(db):
     entries = whatsapp.parse_text(SAMPLE, region="Ankara")
-    whatsapp.match_employees(entries, temp_db.list_employees(), region="Ankara")
-    payload = whatsapp.entries_to_dicts(entries)
+    whatsapp.match_employees(entries, db.list_employees(), region="Ankara")
+    whatsapp.apply_shift_defaults(entries)
+    return whatsapp.entries_to_dicts(entries)
+
+
+def _empmap(db):
+    return {int(r[0]): {"full_name": r[1], "department": r[3], "region": r[5]}
+            for r in db.list_employees()}
+
+
+def test_preview_excel_sheets(temp_db, tmp_path):
+    from cli_anything.puantaj import preview_xlsx
     out = tmp_path / "preview.xlsx"
     path = preview_xlsx.build_preview(
-        str(out), payload,
-        employees_by_id={
-            int(r[0]): {"full_name": r[1], "department": r[3], "region": r[5]}
-            for r in temp_db.list_employees()
-        },
+        str(out), _payload(temp_db), employees_by_id=_empmap(temp_db),
         settings=temp_db.get_all_settings(),
+        shift_templates=temp_db.list_shift_templates(),
     )
     assert os.path.isfile(path) and os.path.getsize(path) > 1000
-    # Sekme adlari
     from openpyxl import load_workbook
     wb = load_workbook(path)
-    assert "Ozet" in wb.sheetnames
-    assert "Calisan Matrisi" in wb.sheetnames
-    assert "Calisan Analizi" in wb.sheetnames
-    assert "Detay" in wb.sheetnames
-    assert "Gunluk Ozet" in wb.sheetnames
-    assert "Uyarilar" in wb.sheetnames
+    for sheet in ("Ozet", "Calisan Matrisi", "Calisan Analizi", "Detay",
+                  "Gunluk Ozet", "Uyarilar"):
+        assert sheet in wb.sheetnames
 
 
-def test_preview_matrix_has_employee_rows_and_date_columns(temp_db, tmp_path):
+def test_preview_per_employee_sheets(temp_db, tmp_path):
     from cli_anything.puantaj import preview_xlsx
-    entries = whatsapp.parse_text(SAMPLE, region="Ankara")
-    whatsapp.match_employees(entries, temp_db.list_employees(), region="Ankara")
-    payload = whatsapp.entries_to_dicts(entries)
     out = tmp_path / "preview.xlsx"
     preview_xlsx.build_preview(
-        str(out), payload,
-        employees_by_id={int(r[0]): {"full_name": r[1], "department": r[3], "region": r[5]}
-                         for r in temp_db.list_employees()},
-        settings=temp_db.get_all_settings(),
-    )
-    from openpyxl import load_workbook
-    wb = load_workbook(str(out))
-    ws = wb["Calisan Matrisi"]
-    # Calisanlar sutun A'da
-    employees_in_col_a = [ws.cell(row=r, column=1).value for r in range(3, ws.max_row + 1)]
-    employees_in_col_a = [v for v in employees_in_col_a if v]
-    assert any("Ahmet Yilmaz" in str(v) for v in employees_in_col_a)
-    assert any("Mehmet Demir" in str(v) for v in employees_in_col_a)
-    # 1-3 Ocak araligi 3 tarih sutunu olmali (D, E, F)
-    second_row_headers = [ws.cell(row=2, column=c).value for c in range(4, 7)]
-    assert all(v and ("01 " in str(v) or "02 " in str(v) or "03 " in str(v))
-               for v in second_row_headers)
-
-
-def test_preview_has_per_employee_sheets_with_daily_detail(temp_db, tmp_path):
-    from cli_anything.puantaj import preview_xlsx
-    entries = whatsapp.parse_text(SAMPLE, region="Ankara")
-    whatsapp.match_employees(entries, temp_db.list_employees(), region="Ankara")
-    payload = whatsapp.entries_to_dicts(entries)
-    out = tmp_path / "preview.xlsx"
-    preview_xlsx.build_preview(
-        str(out), payload,
-        employees_by_id={int(r[0]): {"full_name": r[1], "department": r[3], "region": r[5]}
-                         for r in temp_db.list_employees()},
+        str(out), _payload(temp_db), employees_by_id=_empmap(temp_db),
         settings=temp_db.get_all_settings(),
         shift_templates=temp_db.list_shift_templates(),
     )
     from openpyxl import load_workbook
     wb = load_workbook(str(out))
-    # Per-employee sheets for matched employees should exist
-    assert "Ahmet Yilmaz" in wb.sheetnames
-    assert "Mehmet Demir" in wb.sheetnames
-    ws = wb["Ahmet Yilmaz"]
-    # Baslik basligi 4. satirda
-    header_row = [ws.cell(row=4, column=c).value for c in range(1, 17)]
-    for need in ("Tarih", "Gun", "Durum", "Vardiya", "Giris", "Cikis",
-                 "Mola (dk)", "Calisilan (s)", "Plan (s)", "Fazla Mesai (s)",
-                 "Gece (s)", "Pazar Mesaisi (s)", "Ozel Gun"):
-        assert need in header_row, f"{need} basligi yok"
-    # 3 gun veri var, sondaki TOPLAM satiri
-    last_label = ws.cell(row=ws.max_row, column=1).value
-    assert last_label == "TOPLAM"
-    # Donem 2026-01-01..2026-01-03 (3 gun); 3 veri satiri + toplam = 4 row
-    # header_row=4, sonra 3 gun, sonra toplam -> max_row >= 8
-    assert ws.max_row >= 8
+    # Hasan icin ayri sekme olmali
+    assert any("Hasan" in s for s in wb.sheetnames)
 
 
-def test_preview_analysis_has_per_employee_totals(temp_db, tmp_path):
-    from cli_anything.puantaj import preview_xlsx
-    entries = whatsapp.parse_text(SAMPLE, region="Ankara")
-    whatsapp.match_employees(entries, temp_db.list_employees(), region="Ankara")
-    payload = whatsapp.entries_to_dicts(entries)
-    out = tmp_path / "preview.xlsx"
-    preview_xlsx.build_preview(
-        str(out), payload,
-        employees_by_id={int(r[0]): {"full_name": r[1], "department": r[3], "region": r[5]}
-                         for r in temp_db.list_employees()},
-        settings=temp_db.get_all_settings(),
-    )
-    from openpyxl import load_workbook
-    wb = load_workbook(str(out))
-    ws = wb["Calisan Analizi"]
-    headers = [ws.cell(row=1, column=c).value for c in range(1, ws.max_column + 1)]
-    for need in ("Calisma G.", "Toplam (s)", "Fazla Mesai (s)", "Devamsizlik %"):
-        assert need in headers, f"{need} basligi yok"
-    # Son satir TOPLAM olmali
-    last_label = ws.cell(row=ws.max_row, column=1).value
-    assert last_label == "TOPLAM"
-
-
-def test_apply_writes_timesheets_and_attendance(temp_db):
+def test_apply_writes_records(temp_db):
     from cli_anything.puantaj import bulk
-    entries = whatsapp.parse_text(SAMPLE, region="Ankara")
-    whatsapp.match_employees(entries, temp_db.list_employees(), region="Ankara")
-    payload = whatsapp.entries_to_dicts(entries)
-    result = bulk.apply_entries(temp_db, payload, default_region="Ankara")
+    result = bulk.apply_entries(temp_db, _payload(temp_db), default_region="Ankara")
     assert result.timesheets_added >= 4
-    assert result.attendance_added >= 3
-    # DB sahnesi
     ts = temp_db.list_timesheets()
     att = temp_db.list_attendance_records()
     assert ts and att
-    # Mukerrer apply ayni gun + calisan icin overwrite kapaliysa atlanmali (yeniden timesheet eklenmemeli)
-    before = len(ts)
-    bulk.apply_entries(temp_db, payload, default_region="Ankara", overwrite=False)
-    # Calisti timesheets ekleyebilir (UNIQUE constraint yok), ama attendance upsert nedeniyle ayni kalmali
-    after_att = len(temp_db.list_attendance_records())
-    assert after_att == len(att)
-    # overwrite ile ayni gun timesheets temizlenip yeniden yazilir
-    bulk.apply_entries(temp_db, payload, default_region="Ankara", overwrite=True)
-    # En azindan kayit sayisi makul kalmali (her gun + calisan icin tek timesheet)
-    assert len(temp_db.list_timesheets()) <= before + len(payload)

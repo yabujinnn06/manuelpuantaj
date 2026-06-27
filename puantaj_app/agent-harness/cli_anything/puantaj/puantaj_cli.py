@@ -615,6 +615,7 @@ def whatsapp_parse(ctx, input_file, text, default_date, region, out_json):
     raw = _read_input_text(input_file, text)
     entries = wa_mod.parse_text(raw, default_date=default_date, region=region)
     wa_mod.match_employees(entries, db.list_employees(), region=region)
+    wa_mod.apply_shift_defaults(entries)
     payload = wa_mod.entries_to_dicts(entries)
     if out_json:
         with open(out_json, "w", encoding="utf-8") as f:
@@ -645,6 +646,7 @@ def whatsapp_preview(ctx, input_file, text, records_json, default_date, region, 
         raw = _read_input_text(input_file, text)
         entries = wa_mod.parse_text(raw, default_date=default_date, region=region)
         wa_mod.match_employees(entries, db.list_employees(), region=region)
+        wa_mod.apply_shift_defaults(entries)
         payload = wa_mod.entries_to_dicts(entries)
     out_path = _load_preview_mod().build_preview(
         output, payload,
@@ -706,6 +708,7 @@ def whatsapp_ingest(ctx, input_file, text, default_date, region, preview_out, as
     raw = _read_input_text(input_file, text)
     entries = wa_mod.parse_text(raw, default_date=default_date, region=region)
     wa_mod.match_employees(entries, db.list_employees(), region=region)
+    wa_mod.apply_shift_defaults(entries)
     payload = wa_mod.entries_to_dicts(entries)
 
     if not preview_out:
