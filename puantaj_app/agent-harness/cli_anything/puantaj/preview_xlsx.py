@@ -671,7 +671,11 @@ def _build_per_employee_sheets(wb, entries, employees_by_id, settings, shift_tem
                     for e in entries if _parse_date_str(e.get("work_date"))})
     if not dates:
         return
-    span_start, span_end = dates[0], dates[-1]
+    global_start, global_end = dates[0], dates[-1]
+    # Global donem makulse (<=45 gun ~ 1 ay) tum calisanlar ayni takvimde
+    # hizalanir. Cok genisse (orn dagik tarihler) her calisan kendi araligini
+    # kullanir; aksi halde sayfa yuzlerce bos "(kayit yok)" satiriyla dolar.
+    use_global_span = (global_end - global_start).days <= 45
 
     # Calisan bazli grupla
     grouped: dict[str, dict] = {}
@@ -694,6 +698,14 @@ def _build_per_employee_sheets(wb, entries, employees_by_id, settings, shift_tem
     sorted_keys = sorted(grouped.keys(), key=lambda k: grouped[k]["label"].casefold())
     for key in sorted_keys:
         g = grouped[key]
+        # Bu calisanin gosterim araligi
+        emp_dates = sorted(d for d in g["days"].keys() if d)
+        if not emp_dates:
+            continue
+        if use_global_span:
+            span_start, span_end = global_start, global_end
+        else:
+            span_start, span_end = emp_dates[0], emp_dates[-1]
         sheet_name = _sanitize_sheet_name(g["label"][:28], used_sheet_names)
         ws = wb.create_sheet(sheet_name)
 
