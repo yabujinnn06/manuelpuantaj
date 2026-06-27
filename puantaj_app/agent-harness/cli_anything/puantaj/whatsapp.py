@@ -115,6 +115,7 @@ class ParsedEntry:
     notes: str = ""
     region: str | None = None
     sender: str | None = None
+    sender_key: str | None = None  # gonderen kimligi (telefon veya isim)
     employee_id: int | None = None
     matched_name: str | None = None
     department: str | None = None
@@ -198,13 +199,14 @@ def _split_messages(text: str, default_year: int):
                 yield current
             # rest'i ORIJINAL satirdan al (folded degil) ki isim/saat korunur
             rest_orig = _extract_rest_original(line)
-            sender, body = _split_sender(rest_orig)
+            sender, sender_key, body = _split_sender(rest_orig)
             parts = head.group("date").split(".")
             head_date = _parse_date(parts[0], parts[1], parts[2], default_year) \
                 if len(parts) >= 3 else None
             current = {
                 "date": head_date,
                 "sender": sender,
+                "sender_key": sender_key,
                 "lines": [body] if body else [],
             }
         else:
@@ -226,17 +228,22 @@ def _extract_rest_original(line: str) -> str:
     return m.group(1) if m else line
 
 
-def _split_sender(rest: str) -> tuple[str | None, str]:
-    """'Gonderen: body' -> (gonderen, body). ':' yoksa (None, rest)."""
+def _split_sender(rest: str) -> tuple[str | None, str | None, str]:
+    """'Gonderen: body' -> (gonderen_adi, gonderen_anahtari, body).
+
+    Gonderen anahtari kisi kimligidir: telefon ise "tel:<no>", isim ise
+    "name:<normalize>". Ayni gonderenden gelen tum mesajlar ayni kisidir.
+    """
     # Telefon numarasi gonderen: "+90 505 074 24 61: body"
     m = re.match(r"^(\+?\d[\d\s]{6,}):\s*(.*)$", rest)
     if m:
-        return None, m.group(2)  # telefon -> gonderen yok say
+        phone = re.sub(r"\s+", "", m.group(1))
+        return None, f"tel:{phone}", m.group(2)
     m = re.match(r"^([^:]{1,40}?):\s*(.*)$", rest)
     if m:
         sender = m.group(1).strip()
-        return sender, m.group(2)
-    return None, rest
+        return sender, f"name:{_fold(sender)}", m.group(2)
+    return None, None, rest
 
 
 def _is_system_message(sender: str | None, body_lines: list[str]) -> bool:
@@ -389,6 +396,7 @@ def parse_text(text: str, default_date: str | None = None,
         if _is_system_message(sender, body_lines):
             continue
 
+        sender_key = msg.get("sender_key")
         # Mesaj genelinde tek kisi varsayimi: ismi mesaj seviyesinde belirle.
         # Cok-gunlu mesajlarda (Hasan gibi) isim hep en ustte/altta bir kez yazilir;
         # blok bazli isim aramak not satirlarindan yanlis isim cikarir.
@@ -479,10 +487,55 @@ def parse_text(text: str, default_date: str | None = None,
                 notes=" | ".join(note_bits),
                 region=region,
                 sender=sender,
+                sender_key=sender_key,
                 warnings=warnings,
             ))
 
+    # Gonderen-bazli kanonik isim: ayni gonderenin tum kayitlari tek kisidir.
+    _assign_canonical_names(entries)
     return entries
+
+
+def _is_valid_person_name(name: str) -> bool:
+    """Mesaj ici aday bir kisi ismi gibi mi? (ad-soyad, noise yok)."""
+    folded = _fold(_strip_math_bold(name))
+    if not folded or any(ch.isdigit() for ch in name):
+        return False
+    if _NAME_NOISE.search(folded):
+        return False
+    words = [w for w in folded.split() if len(w) >= 2]
+    return 1 <= len(words) <= 3 and len(folded) >= 3
+
+
+def _assign_canonical_names(entries: list[ParsedEntry]) -> None:
+    """Her gonderen (telefon veya isim) tek bir kisidir. O gonderenin tum
+    kayitlarina, mesaj govdelerinde en cok gecen gercek ismi (yoksa gonderen
+    adini) kanonik olarak atar. Boylece ayni kisi farkli yazimlarla ('Hasan
+    TONTUR'/'Hasan tontur') veya alakasiz satirlarla ('Tesekkur') bolunmez.
+    """
+    from collections import defaultdict, Counter
+    groups: dict[str, list[ParsedEntry]] = defaultdict(list)
+    for e in entries:
+        key = e.sender_key or f"rawname:{_fold(e.employee_name_raw)}"
+        groups[key].append(e)
+
+    for key, group in groups.items():
+        votes: Counter = Counter()
+        sender_name = None
+        for e in group:
+            if e.sender and not _fold(e.sender).replace(" ", "").isdigit():
+                sender_name = e.sender
+            nm = (e.employee_name_raw or "").strip()
+            if nm and _is_valid_person_name(nm):
+                votes[_clean_name(nm)] += 1
+        if votes:
+            canonical = votes.most_common(1)[0][0]
+        elif sender_name:
+            canonical = _clean_name(_strip_math_bold(sender_name))
+        else:
+            canonical = group[0].employee_name_raw or "?"
+        for e in group:
+            e.employee_name_raw = canonical
 
 
 # ---------------------------------------------------------------- isim eslestirme

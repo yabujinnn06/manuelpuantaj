@@ -137,6 +137,45 @@ def test_multi_day_message_keeps_name():
     assert j5.end_time == "23:00"
 
 
+def test_sender_based_identity_no_phantom_names():
+    """Ayni gonderenin tum mesajlari tek kisidir; sohbet/not satirlari
+    uydurma calisan uretmez."""
+    text = (
+        "7.01.2026 öğleden önce 11:34 - Hasan Teknik: Hasan TONTUR\n"
+        "01.01.26\n"
+        "YILBAŞI\n"
+        "02.01.26\n"
+        "Giriş 08:30\n"
+        "Stan kuruldu ertesi sabaha kadar\n"
+        "12.01.2026 akşam 4:43 - Hasan Teknik: Teşekkürler. Sabah 06:00 /22:00 arası. Pazar mesai si\n"
+        "13.01.2026 akşam 6:46 - Hasan Teknik: 13.01.26\n"
+        "Hasan tontur\n"
+        "Giriş 7.30\n"
+        "Çıkış 18:45\n"
+    )
+    entries = whatsapp.parse_text(text, region="Ankara")
+    names = {e.employee_name_raw for e in entries}
+    # Tek kisi olmali; "Stan kuruldu", "Tesekkurler" gibi isimler OLMAMALI
+    assert len(names) == 1, names
+    only = next(iter(names))
+    assert "Hasan" in only
+    assert "Stan" not in only and "esekkur" not in only.lower()
+
+
+def test_phone_sender_grouped_as_one_person():
+    text = (
+        "13.01.2026 akşamüstü 6:40 - +90 537 732 05 42: 13.01.26 Ata Türkbey\n"
+        "Çıkış saati 17:30\n"
+        "14.01.2026 akşam 7:05 - +90 537 732 05 42: 14.01.2026\n"
+        "Çıkış 19:04\n"
+        "Ata Türkbey\n"
+    )
+    entries = whatsapp.parse_text(text, region="Ankara")
+    names = {e.employee_name_raw for e in entries}
+    assert len(names) == 1
+    assert "Ata" in next(iter(names))
+
+
 def test_year_typo_corrected():
     text = ("6.01.2026 öğleden sonra 5:31 - Hasan Teknik: 06.01.2016 çıkış 17.30\n"
             "Hasan TONTUR\n")
