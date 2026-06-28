@@ -88,12 +88,57 @@ def _write_headers(ws, row: int, headers: list[str]):
     ws.row_dimensions[row].height = 22
 
 
+_CALC_FN = None
+_CALC_TRIED = False
+
+
+def _load_calc_fn():
+    """calc.calc_day_hours'i bulur. Caller sys.path'i ayarlamamis olsa bile
+    dosya konumundan yukari dogru calc.py arayip yukler (puantaj_app/calc.py)."""
+    global _CALC_FN, _CALC_TRIED
+    if _CALC_TRIED:
+        return _CALC_FN
+    _CALC_TRIED = True
+    # 1) Hazirsa dogrudan import
+    try:
+        from calc import calc_day_hours  # type: ignore
+        _CALC_FN = calc_day_hours
+        return _CALC_FN
+    except Exception:
+        pass
+    # 2) Dosya konumundan yukari dogru calc.py ara
+    import importlib.util
+    here = os.path.dirname(os.path.abspath(__file__))
+    cur = here
+    for _ in range(8):
+        for cand in (os.path.join(cur, "calc.py"),
+                     os.path.join(cur, "puantaj_app", "calc.py"),
+                     os.path.join(cur, "server", "calc.py")):
+            if os.path.isfile(cand):
+                try:
+                    spec = importlib.util.spec_from_file_location("_puantaj_calc", cand)
+                    mod = importlib.util.module_from_spec(spec)
+                    spec.loader.exec_module(mod)  # type: ignore
+                    _CALC_FN = getattr(mod, "calc_day_hours", None)
+                    if _CALC_FN:
+                        return _CALC_FN
+                except Exception:
+                    pass
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            break
+        cur = parent
+    return _CALC_FN
+
+
 def _safe_calc(work_date, start_time, end_time, break_minutes, settings, is_special, department):
     if not start_time or not end_time:
         return None
+    fn = _load_calc_fn()
+    if fn is None:
+        return None
     try:
-        from calc import calc_day_hours  # type: ignore
-        return calc_day_hours(
+        return fn(
             work_date, start_time, end_time, int(break_minutes or 0),
             settings or {}, 1 if is_special else 0, department,
         )

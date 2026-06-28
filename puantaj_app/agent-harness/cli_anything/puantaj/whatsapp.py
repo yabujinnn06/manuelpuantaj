@@ -675,16 +675,9 @@ def department_default_start(department: str | None, end_time: str | None) -> tu
     """
     key = _dept_key(department)
     if "stant" in key:
-        # Stant: cikisa gore vardiya tahmini
-        if end_time:
-            try:
-                eh = int(end_time.split(":")[0])
-            except (ValueError, IndexError):
-                eh = None
-            if eh is not None:
-                if eh <= 18:
-                    return "10:00", True
-                return "14:00", True
+        # Stant standart vardiyasi AVM acilisi 10:00'da baslar. Cikisa gore
+        # giris tahmin ETME (gec cikisi gec girise baglamak fazla mesaiyi
+        # yanlislikla sifirlar); tek standart baslangic kullan.
         return "10:00", True
     for token, default in DEPARTMENT_DEFAULT_START.items():
         if token != "stant" and token in key and default:
