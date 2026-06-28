@@ -120,6 +120,7 @@ class ParsedEntry:
     matched_name: str | None = None
     department: str | None = None
     confidence: float = 0.0
+    is_non_worker: bool = False  # admin/ornek/sablon mesaji (calisan kaydi degil)
     warnings: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict:
@@ -262,8 +263,28 @@ _NAME_NOISE = re.compile(
     r"\b(?:giris|gir[i1]s|cikis|c[i1]k[i1]s|saati|saat|full|izin|izinli|haftalik|"
     r"yillik|mazeret|rapor|raporlu|pazar|mesai|mesaisi|yilbasi|cumartesi|tatil|"
     r"sabah|aksam|gece|ogleden|tam|gun|yarim|abi|stant|teknik|rainwater|avm|"
-    r"anatolium|ofis|demo|trafik|montaj|qr|kod|okut)\b"
+    r"anatolium|ofis|demo|trafik|montaj|qr|kod|okut|ornek|hanim|hanimefendi|"
+    r"bey|bilgi|islem|arkadaslar|herkes|merhaba|tesekkur)\b"
 )
+
+# "İk" / "İK" departmani: aksansiz foldda tek basina 'ik' tokeni (admin/İK gonderen)
+_NAME_NOISE_IK = re.compile(r"(?:^|\s)ik(?:$|\s)")
+
+# Ornek/sablon mesaji: "*Ornek: ... Cikis Saati: 17:30*" gibi. Bunlar gercek
+# kayit degil, format ornegidir; kayda donusmemeli.
+_EXAMPLE_RE = re.compile(r"\bornek\b\s*[:\-]")
+
+# Grubu kuran kisi (admin): "Altan Akbas Abi ... grubunu olusturdu"
+_GROUP_CREATOR_RE = re.compile(r"^(?P<name>.+?)\s+\".*?\"\s+grubunu olusturdu")
+# Gonderen adinda rol/departman isareti -> admin/Ik/Bilgi Islem (calisan degil)
+_ADMIN_SENDER_RE = re.compile(r"(?:\bik\b|rainwater|bilgi islem|insan kaynak)")
+
+
+def _is_admin_sender_name(name: str | None) -> bool:
+    if not name:
+        return False
+    folded = _fold(_strip_math_bold(name))
+    return bool(_ADMIN_SENDER_RE.search(folded) or _NAME_NOISE_IK.search(folded))
 
 
 def _looks_like_name(line: str) -> bool:
@@ -324,6 +345,8 @@ def _extract_times(text_block: str) -> tuple[str | None, str | None]:
         folded = _fold(raw_line)
         # Tarihleri maskele ki yil (2026) saat (20:26) olarak yakalanmasin.
         folded = _DATE_RE.sub(" ", folded)
+        # Bosluklu yil: "07.01 2026" (nokta yok) -> yil saat sanilmasin.
+        folded = re.sub(r"\b\d{1,2}\.\d{1,2}\s+(?:19|20)\d{2}\b", " ", folded)
         if not folded.strip():
             continue
         if start is None:
@@ -387,6 +410,15 @@ def parse_text(text: str, default_date: str | None = None,
         if default_date and len(default_date) >= 4 and default_date[:4].isdigit():
             default_year = int(default_date[:4])
 
+    # Grubu kuran kisi(ler) = admin; calisan sayilmaz.
+    admin_names: set[str] = set()
+    for raw in text.splitlines():
+        # Bidi/zero-width isaretleri at, sonra fold'la.
+        folded = _fold(re.sub(r"[‎‏‪-‮]", "", raw))
+        cm = re.search(r"-\s*(?P<n>[^\"]+?)\s+[\"'].*?grubunu olusturdu", folded)
+        if cm:
+            admin_names.add(cm.group("n").strip())
+
     entries: list[ParsedEntry] = []
     for msg in _split_messages(text, default_year):
         sender = msg["sender"]
@@ -394,6 +426,9 @@ def parse_text(text: str, default_date: str | None = None,
         if not body_lines:
             continue
         if _is_system_message(sender, body_lines):
+            continue
+        # Ornek/sablon mesajlari ("*Ornek: ... Cikis Saati: 17:30*") kayit degil.
+        if _EXAMPLE_RE.search(_fold(" ".join(body_lines))):
             continue
 
         sender_key = msg.get("sender_key")
@@ -492,7 +527,7 @@ def parse_text(text: str, default_date: str | None = None,
             ))
 
     # Gonderen-bazli kanonik isim: ayni gonderenin tum kayitlari tek kisidir.
-    _assign_canonical_names(entries)
+    _assign_canonical_names(entries, admin_names)
     return entries
 
 
@@ -501,19 +536,28 @@ def _is_valid_person_name(name: str) -> bool:
     folded = _fold(_strip_math_bold(name))
     if not folded or any(ch.isdigit() for ch in name):
         return False
-    if _NAME_NOISE.search(folded):
+    if _NAME_NOISE.search(folded) or _NAME_NOISE_IK.search(folded):
+        return False
+    # Turkce cogul/iyelik ekli prose kelimeleri (arkadaslar, yazdiklari) isim degil
+    if re.search(r"\w+(?:lari|leri|diklari|dikleri)\b", folded):
         return False
     words = [w for w in folded.split() if len(w) >= 2]
     return 1 <= len(words) <= 3 and len(folded) >= 3
 
 
-def _assign_canonical_names(entries: list[ParsedEntry]) -> None:
+def _assign_canonical_names(entries: list[ParsedEntry],
+                            admin_names: set[str] | None = None) -> None:
     """Her gonderen (telefon veya isim) tek bir kisidir. O gonderenin tum
     kayitlarina, mesaj govdelerinde en cok gecen gercek ismi (yoksa gonderen
     adini) kanonik olarak atar. Boylece ayni kisi farkli yazimlarla ('Hasan
     TONTUR'/'Hasan tontur') veya alakasiz satirlarla ('Tesekkur') bolunmez.
+
+    admin_names: grubu kuran / Ik / Bilgi Islem gibi calisan olmayan gonderenler
+    (folded). Bu gonderenler govdede kendi adiyla puantaj yazmamissa (oy=0)
+    kayitlari non_worker olarak isaretlenir.
     """
     from collections import defaultdict, Counter
+    admin_names = admin_names or set()
     groups: dict[str, list[ParsedEntry]] = defaultdict(list)
     for e in entries:
         key = e.sender_key or f"rawname:{_fold(e.employee_name_raw)}"
@@ -528,14 +572,38 @@ def _assign_canonical_names(entries: list[ParsedEntry]) -> None:
             nm = (e.employee_name_raw or "").strip()
             if nm and _is_valid_person_name(nm):
                 votes[_clean_name(nm)] += 1
+        non_worker = False
+        # Gonderen admin/Ik/Bilgi Islem ve govdede kendi puantajini yazmamis:
+        # bu kisi calisan degil, kayitlari isaretle.
+        if not votes and (
+                _is_admin_sender_name(sender_name)
+                or (sender_name and _fold(sender_name) in admin_names)):
+            non_worker = True
         if votes:
             canonical = votes.most_common(1)[0][0]
         elif sender_name:
-            canonical = _clean_name(_strip_math_bold(sender_name))
+            # Gonderen adina dus; ama noise kelimeleri (Rainwater, Ik, Hanim,
+            # Abi...) temizle. Geriye gecerli ad-soyad kalmazsa bu gonderen bir
+            # calisan degil (admin/Ik/patron) -> kayitlari isaretle, eleme icin.
+            sn = _clean_name(_strip_math_bold(sender_name))
+            words = [w for w in re.split(r"\s+", sn) if w
+                     and not _NAME_NOISE.search(_fold(w))
+                     and not _NAME_NOISE_IK.search(_fold(" " + w + " "))]
+            cleaned = " ".join(words[:3]).strip(" -:,;.")
+            if cleaned and _is_valid_person_name(cleaned):
+                canonical = cleaned
+            else:
+                canonical = sn or (group[0].employee_name_raw or "?")
+                non_worker = True
         else:
             canonical = group[0].employee_name_raw or "?"
+            non_worker = True
         for e in group:
             e.employee_name_raw = canonical
+            if non_worker:
+                e.is_non_worker = True
+                e.warnings.append(
+                    "Gonderen calisan gibi gorunmuyor (admin/Ik/ornek); kontrol et.")
 
 
 # ---------------------------------------------------------------- isim eslestirme

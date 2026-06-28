@@ -83,6 +83,15 @@ def apply_entries(
 
     for raw in entries:
         rec = dict(raw)
+        # Admin/Ik/ornek kayitlari (calisan degil) DB'ye yazilmaz.
+        if rec.get("is_non_worker"):
+            result.skipped += 1
+            result.skipped_details.append({
+                "reason": "Calisan degil (admin/Ik/ornek)",
+                "name": rec.get("employee_name_raw"),
+                "work_date": rec.get("work_date"),
+            })
+            continue
         emp_id = _resolve_employee_id(rec, employees)
         work_date = rec.get("work_date")
         if not emp_id or not work_date:

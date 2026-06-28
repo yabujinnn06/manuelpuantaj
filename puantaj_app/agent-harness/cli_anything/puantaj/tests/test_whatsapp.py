@@ -186,6 +186,50 @@ def test_year_typo_corrected():
                for w in entries[0].warnings)
 
 
+def test_space_separated_year_not_time():
+    # "07.01 2026 Cikis: 02:00" -> yil bosluklu yazilmis; 2026 saat (20:26) sanilmamali
+    text = ("7.01.2026 sabah 10:51 - Ercüment Abi Rainwater: 07.01 2026 Çıkış: 02:00\n")
+    entries = whatsapp.parse_text(text, region="Ankara")
+    assert entries
+    assert entries[0].end_time == "02:00"
+
+
+def test_example_template_message_skipped():
+    # "*Ornek: ... Cikis Saati: 17:30*" sablon mesaji kayit uretmemeli
+    text = ("6.01.2026 öğleden sonra 12:54 - Hüseyincan Orman: "
+            "*Örnek: Hüseyincan Orman 6.01.2026 Çıkış Saati: 17:30*\n")
+    entries = whatsapp.parse_text(text, region="Ankara")
+    workers = [e for e in entries if not e.is_non_worker]
+    assert workers == []
+
+
+def test_admin_group_creator_flagged_non_worker():
+    # Grubu kuran kisi (admin) puantaj yazsa bile calisan sayilmaz.
+    text = (
+        "6.01.2026 öğleden önce 11:13 - ‎Altan Akbaş Abi \"Ankara rainwater puantaj\" grubunu oluşturdu\n"
+        "19.01.2026 öğleden sonra 4:20 - Altan Akbaş Abi: Stanttaki arkadaşlar full yazdıkları zaman 10:00-22:00\n"
+    )
+    entries = whatsapp.parse_text(text, region="Ankara")
+    # Altan'in uretebildigi tum kayitlar non_worker isaretli olmali
+    assert all(e.is_non_worker for e in entries)
+
+
+def test_ik_sender_flagged_non_worker():
+    text = ("20.05.2026 öğleden sonra 5:41 - Begüm Hanim Rainwater İk: "
+            "Merhabalar, rapor durumu hakkında bilgi.\n")
+    entries = whatsapp.parse_text(text, region="Ankara")
+    assert all(e.is_non_worker for e in entries)
+
+
+def test_real_worker_not_flagged():
+    # Govdede kendi adiyla puantaj yazan gercek calisan non_worker OLMAMALI.
+    text = ("6.01.2026 öğleden sonra 4:14 - +90 537 732 05 42: Ata Türkbey\n"
+            "05.01.2026 çıkış saati 19:00\n")
+    entries = whatsapp.parse_text(text, region="Ankara")
+    assert entries
+    assert not any(e.is_non_worker for e in entries)
+
+
 def test_clock_normalization():
     assert whatsapp.normalize_clock("19.30") == "19:30"
     assert whatsapp.normalize_clock("0800") == "08:00"

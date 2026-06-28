@@ -589,6 +589,18 @@ def _read_input_text(input_file, text):
     raise click.ClickException("--input veya --text vermelisiniz (--input - ile stdin).")
 
 
+def _partition_workers(payload):
+    """Calisan kayitlarini admin/Ik/ornek (is_non_worker) kayitlardan ayirir."""
+    workers = [e for e in payload if not e.get("is_non_worker")]
+    excluded = [e for e in payload if e.get("is_non_worker")]
+    return workers, excluded
+
+
+def _excluded_summary(excluded):
+    names = sorted({e.get("employee_name_raw") or "?" for e in excluded})
+    return {"haric_birakilan": len(excluded), "haric_kisiler": names}
+
+
 def _employees_by_id():
     return {
         int(row[0]): {
@@ -616,17 +628,19 @@ def whatsapp_parse(ctx, input_file, text, default_date, region, out_json):
     entries = wa_mod.parse_text(raw, default_date=default_date, region=region)
     wa_mod.match_employees(entries, db.list_employees(), region=region)
     wa_mod.apply_shift_defaults(entries)
-    payload = wa_mod.entries_to_dicts(entries)
+    payload, excluded = _partition_workers(wa_mod.entries_to_dicts(entries))
     if out_json:
         with open(out_json, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2, default=str)
-    _emit(ctx, payload if ctx.obj.get("json") else {
+    summary = {
         "kayit_sayisi": len(payload),
         "eslesen": sum(1 for e in payload if e.get("employee_id")),
         "eslemeyen": sum(1 for e in payload if not e.get("employee_id")),
         "uyarili": sum(1 for e in payload if e.get("warnings")),
         "out_json": os.path.abspath(out_json) if out_json else None,
-    })
+    }
+    summary.update(_excluded_summary(excluded))
+    _emit(ctx, payload if ctx.obj.get("json") else summary)
 
 
 @whatsapp.command("preview")
@@ -648,18 +662,21 @@ def whatsapp_preview(ctx, input_file, text, records_json, default_date, region, 
         wa_mod.match_employees(entries, db.list_employees(), region=region)
         wa_mod.apply_shift_defaults(entries)
         payload = wa_mod.entries_to_dicts(entries)
+    payload, excluded = _partition_workers(payload)
     out_path = _load_preview_mod().build_preview(
         output, payload,
         employees_by_id=_employees_by_id(),
         settings=db.get_all_settings(),
         shift_templates=db.list_shift_templates(),
     )
-    _emit(ctx, {
+    summary = {
         "status": "ok",
         "output": out_path,
         "kayit_sayisi": len(payload),
         "eslemeyen": sum(1 for e in payload if not e.get("employee_id")),
-    })
+    }
+    summary.update(_excluded_summary(excluded))
+    _emit(ctx, summary)
 
 
 @whatsapp.command("apply")
@@ -709,7 +726,7 @@ def whatsapp_ingest(ctx, input_file, text, default_date, region, preview_out, as
     entries = wa_mod.parse_text(raw, default_date=default_date, region=region)
     wa_mod.match_employees(entries, db.list_employees(), region=region)
     wa_mod.apply_shift_defaults(entries)
-    payload = wa_mod.entries_to_dicts(entries)
+    payload, excluded = _partition_workers(wa_mod.entries_to_dicts(entries))
 
     if not preview_out:
         from datetime import datetime as _dt
@@ -730,6 +747,7 @@ def whatsapp_ingest(ctx, input_file, text, default_date, region, preview_out, as
         "eslemeyen": sum(1 for e in payload if not e.get("employee_id")),
         "uyarili": sum(1 for e in payload if e.get("warnings")),
     }
+    summary.update(_excluded_summary(excluded))
 
     if not assume_yes:
         if not sys.stdin.isatty() or ctx.obj.get("json"):
