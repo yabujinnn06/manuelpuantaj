@@ -100,6 +100,28 @@ DEPARTMENT_DEFAULT_START = {
 GENERIC_DEFAULT_START = "08:30"
 FULL_SHIFT = ("10:00", "22:00")
 
+# Vardiya kodu: "14-10", "2/10", "10/10", "10/18" gibi (saat:dk DEGIL, sadece
+# saat-saat). Stant calisanlari bazen giris-cikis yerine vardiya kodu yazar.
+_SHIFT_CODE_RE = re.compile(r"^\s*(\d{1,2})\s*[/\-]\s*(\d{1,2})\s*$")
+
+
+def _resolve_shift_code(a: int, b: int) -> tuple[str, str] | None:
+    """Saat-saat vardiya kodunu (giris, cikis) saatlerine cozer.
+
+    Stant baglami: giris oglen/sabah (10-14), cikis aksam (18-23). Kucuk
+    degerler PM kabul edilir: '2/10' -> 14:00-22:00, '10/10' -> 10:00-22:00,
+    '14-10' -> 14:00-22:00, '10/18' -> 10:00-18:00.
+    """
+    if not (0 <= a <= 23 and 0 <= b <= 23):
+        return None
+    gi = a + 12 if a < 8 else a            # 2->14, 10->10, 14->14
+    co = b
+    if co <= 12 or co <= gi:               # aksam cikisi PM'e cek: 10->22, 8->20
+        co += 12
+    if co > 23 or gi >= co or co - gi > 14:
+        return None
+    return f"{gi:02d}:00", f"{co:02d}:00"
+
 
 @dataclass
 class ParsedEntry:
@@ -341,7 +363,15 @@ def _extract_times(text_block: str) -> tuple[str | None, str | None]:
     """Giris/cikis saatlerini cikarir. SATIR SATIR calisir ki cok-satirli
     'Giris 10:00 / Cikis 18:00' bloklarinda giris cikisa karismasin."""
     start = end = None
+    shift_code = None  # etiketli saat bulunamazsa kullanilacak vardiya kodu
     for raw_line in text_block.splitlines():
+        # Vardiya kodu satiri mi? ("14-10", "2/10") - tarih maskelemeden once bak.
+        code_m = _SHIFT_CODE_RE.match(_fold(raw_line))
+        if code_m and ":" not in raw_line:
+            resolved = _resolve_shift_code(int(code_m.group(1)), int(code_m.group(2)))
+            if resolved and shift_code is None:
+                shift_code = resolved
+            continue
         folded = _fold(raw_line)
         # Tarihleri maskele ki yil (2026) saat (20:26) olarak yakalanmasin.
         folded = _DATE_RE.sub(" ", folded)
@@ -358,6 +388,9 @@ def _extract_times(text_block: str) -> tuple[str | None, str | None]:
             m = _CIKIS_LABEL_AFTER.search(folded) or _CIKIS_LABEL.search(folded)
             if m:
                 end = normalize_clock(m.group(1))
+    # Etiketli saat hic yoksa vardiya kodunu kullan.
+    if shift_code and start is None and end is None:
+        start, end = shift_code
     return start, end
 
 
@@ -442,6 +475,23 @@ def parse_text(text: str, default_date: str | None = None,
             folded = _fold(block_text)
 
             start, end = _extract_times(block_text)
+            time_warn = None
+            if start and end and start == end:
+                # Giris == cikis: tek saat bulunup ikisine de yazilmis; cikis daha
+                # guvenilir, girisi bosalt -> departman/vardiya varsayilani doldursun.
+                time_warn = f"Giris ve cikis ayni ({end}); giris belirsiz, varsayilan kullanilacak."
+                start = None
+            elif start and end:
+                sh, eh = int(start[:2]), int(end[:2])
+                if eh < sh and eh <= 11:
+                    # "Giris 14:00 / Cikis 10:00" -> cikis 12-saat PM yazilmis (22:00).
+                    # Stant gunduz vardiyasinda cikis girisden once olamaz.
+                    end = f"{eh + 12:02d}:{end[3:]}"
+                    time_warn = (f"Cikis 12-saat yazilmis ({eh}:00); aksam kabul "
+                                 f"edilip {end} alindi.")
+                elif eh < sh:
+                    time_warn = (f"Cikis ({end}) giristen ({start}) once; "
+                                 f"saatleri kontrol et.")
             status = _match_status(block_text)
             is_full = bool(_FULL_RE.search(folded))
             is_sunday = bool(_SUNDAY_WORK_RE.search(folded))
@@ -461,6 +511,8 @@ def parse_text(text: str, default_date: str | None = None,
             warnings: list[str] = []
             is_special = False
             note_bits = ["WhatsApp puantaj"]
+            if time_warn:
+                warnings.append(time_warn)
 
             if is_full:
                 start = start or FULL_SHIFT[0]
@@ -673,6 +725,15 @@ def department_default_start(department: str | None, end_time: str | None) -> tu
 
     Return: (start_time, assumed)  assumed=True ise tahmin edilmistir.
     """
+    # Cikis gece yarisi sonrasi (00:00-06:59) ise kapanis/aksam vardiyasi:
+    # girisi sabaha koymak 17+ saatlik sahte mesai uretir; ogleden sonra baslat.
+    if end_time:
+        try:
+            eh = int(end_time.split(":")[0])
+        except (ValueError, IndexError):
+            eh = None
+        if eh is not None and 0 <= eh <= 6:
+            return "16:00", True
     key = _dept_key(department)
     if "stant" in key:
         # Stant standart vardiyasi AVM acilisi 10:00'da baslar. Cikisa gore

@@ -230,6 +230,42 @@ def test_real_worker_not_flagged():
     assert not any(e.is_non_worker for e in entries)
 
 
+def test_shift_code_resolved():
+    # "14-10" vardiya kodu -> 14:00-22:00 (saat 14:00 giris, 22:00 cikis)
+    assert whatsapp._resolve_shift_code(14, 10) == ("14:00", "22:00")
+    assert whatsapp._resolve_shift_code(2, 10) == ("14:00", "22:00")
+    assert whatsapp._resolve_shift_code(10, 10) == ("10:00", "22:00")
+    assert whatsapp._resolve_shift_code(10, 18) == ("10:00", "18:00")
+    assert whatsapp._resolve_shift_code(7, 30) is None  # 30 dk -> vardiya degil
+
+
+def test_exit_before_entry_treated_as_pm():
+    # "Giris 14:00 / Cikis 10:00" -> cikis aksam 10 = 22:00 (gunduz vardiyasi)
+    text = ("31.01.2026 gece 10:00 - +90 534 771 93 17: 31.01.2026\n"
+            "Eda Nur\n"
+            "Giriş: 14:00\n"
+            "Çıkış 10:00\n")
+    entries = whatsapp.parse_text(text, region="Ankara")
+    rec = next(e for e in entries if e.status == "Calisti")
+    assert rec.start_time == "14:00"
+    assert rec.end_time == "22:00"
+
+
+def test_equal_entry_exit_clears_start():
+    text = ("30.03.2026 akşam 7:00 - +90 532 621 64 06: 30.03.2026 Uğur 09:50 giriş 09:50 çıkış\n")
+    entries = whatsapp.parse_text(text, region="Ankara")
+    rec = next(e for e in entries if e.status == "Calisti")
+    # Esit saatte giris bosaltilir, cikis korunur
+    assert rec.end_time == "09:50"
+    assert rec.start_time is None
+
+
+def test_early_morning_exit_uses_afternoon_default():
+    # Cikis 02:00 (gece yarisi sonrasi) -> giris varsayilani ogleden sonra
+    start, assumed = whatsapp.department_default_start("Stant", "02:00")
+    assert start == "16:00" and assumed is True
+
+
 def test_clock_normalization():
     assert whatsapp.normalize_clock("19.30") == "19:30"
     assert whatsapp.normalize_clock("0800") == "08:00"
